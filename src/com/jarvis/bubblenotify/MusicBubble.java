@@ -181,6 +181,9 @@ public class MusicBubble implements BubbleFeature {
             } catch (Throwable ignored) {
             }
         }
+        // fixed130: switch the capsule line at once (lyric <-> title -
+        // artist) instead of waiting for the next music broadcast.
+        refreshLevelContent();
         scheduleIdle();
         try {
             if (this.host != null) {
@@ -1482,10 +1485,18 @@ public class MusicBubble implements BubbleFeature {
                 // fixed29: line 2, below the status, is the scrolling
                 // "title - artist" (marquee). setSelected(true) keeps the
                 // marquee running.
-                String title = (this.musicTitle == null || this.musicTitle.isEmpty()) ? "未知歌曲" : this.musicTitle;
-                String display = title;
-                if (this.musicArtist != null && !this.musicArtist.isEmpty() && !this.musicArtist.equals(title)) {
-                    display = title + " - " + this.musicArtist;
+                // fixed130: pinned -> line 2 scrolls the current lyric
+                // line instead; unpinned -> "title - artist" as before.
+                // No lyric yet -> fall back to "title - artist".
+                String display;
+                if (this.playerPinned && this.musicLyric != null && !this.musicLyric.isEmpty()) {
+                    display = this.musicLyric;
+                } else {
+                    String title = (this.musicTitle == null || this.musicTitle.isEmpty()) ? "未知歌曲" : this.musicTitle;
+                    display = title;
+                    if (this.musicArtist != null && !this.musicArtist.isEmpty() && !this.musicArtist.equals(title)) {
+                        display = title + " - " + this.musicArtist;
+                    }
                 }
                 if (!display.equals(this.miniSubTextView.getText().toString())) {
                     this.miniSubTextView.setText(display);
