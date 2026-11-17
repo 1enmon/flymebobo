@@ -678,7 +678,9 @@ public class NotifBubble implements BubbleFeature {
                 this.overlayDockPkg = this.soloPkg;
                 this.host.getHandler().removeCallbacks(this.overlayDockRunnable);
                 this.host.getHandler().postDelayed(this.overlayDockRunnable, MINI_DOCK_MS);
-                refreshLevel1();
+                // fixed127: do NOT refresh the card — it stays frozen on
+                // the pinned app; the new notification lives only as the
+                // overlay capsule above.
                 scheduleLevel1Timer();
                 return;
             }
@@ -1011,6 +1013,7 @@ public class NotifBubble implements BubbleFeature {
         // selected in the docked state, so a later expand must not be
         // filtered to the app that was open before.
         this.expandedPkg = null;
+        this.pinnedCardPkg = null;
         // fixed79: and the solo pop with it — the pile holds every app.
         this.soloPkg = null;
         // fixed108: docking reveals every pile icon together, including
@@ -1035,6 +1038,7 @@ public class NotifBubble implements BubbleFeature {
         this.fromDocked = false;
         // fixed43: clear the expanded-app selection when the bubble hides.
         this.expandedPkg = null;
+        this.pinnedCardPkg = null;
         // fixed79: and the solo pop with it.
         this.soloPkg = null;
         // fixed108: and the deferred hidden set with it.
@@ -1159,6 +1163,14 @@ public class NotifBubble implements BubbleFeature {
         if (this.level != 1) {
             return;
         }
+        // fixed127: a pinned card is frozen — a new notification (same
+        // app or different app) must not rebuild or replace it. It only
+        // appears as a capsule overlay (onNewNotification) and auto-docks
+        // after 3s. The pin icon itself is updated in place in
+        // buildPinView, so freezing the rebuild does not hide the pin.
+        if (isCardPinned()) {
+            return;
+        }
         if (this.activeReplyEdit != null && this.activeReplyEdit.hasFocus()) {
             return;
         }
@@ -1279,6 +1291,10 @@ public class NotifBubble implements BubbleFeature {
     // the notification is dismissed by hand. The pin icon is the
     // Flyme balloon (fixed108): white = unpinned, blue = pinned.
     private final HashSet<String> pinnedKeys = new HashSet<>();
+    // fixed127: package of the app whose expanded card the user pinned.
+    // Recorded in togglePin; the pinned card stays anchored to this app
+    // no matter which app's notification arrives next.
+    private String pinnedCardPkg = null;
 
     // fixed108/111: packages whose capsules docked while a pin was
     // active. Their capsule hides from the mini (applyDockedHidden)
@@ -1325,13 +1341,17 @@ public class NotifBubble implements BubbleFeature {
     // checking only currentCardItem() would miss the pin and let the new
     // notification replace the pinned card. The card is pinned if ANY
     // of its displayed items (its app, expandedPkg) is pinned.
+    // fixed127: anchor to pinnedCardPkg (recorded when the user pins
+    // the card) so the check holds even if expandedPkg is null, and a
+    // new notification from ANY app can never unpin or replace it.
     private boolean isCardPinned() {
         if (this.level != 1) {
             return false;
         }
-        if (this.expandedPkg != null) {
+        String cardPkg = this.pinnedCardPkg != null ? this.pinnedCardPkg : this.expandedPkg;
+        if (cardPkg != null) {
             for (NotifItem it : this.items) {
-                if (this.expandedPkg.equals(it.pkg) && isPinned(it)) {
+                if (cardPkg.equals(it.pkg) && isPinned(it)) {
                     return true;
                 }
             }
@@ -1374,6 +1394,16 @@ public class NotifBubble implements BubbleFeature {
             this.pinnedKeys.remove(item.key);
         } else {
             this.pinnedKeys.add(item.key);
+        }
+        // fixed127: record which app's card is pinned. Only the open
+        // card's own item counts — an overlay capsule's pin must not
+        // re-anchor the card to another app.
+        if (this.level == 1 && this.expandedPkg != null && this.expandedPkg.equals(item.pkg)) {
+            if (this.pinnedKeys.contains(item.key)) {
+                this.pinnedCardPkg = item.pkg;
+            } else if (item.pkg != null && item.pkg.equals(this.pinnedCardPkg)) {
+                this.pinnedCardPkg = null;
+            }
         }
         // fixed110: unpinning the expanded card itself drops the
         // capsule overlay (it only lives under a pinned card).
@@ -1441,6 +1471,12 @@ public class NotifBubble implements BubbleFeature {
             public void onClick(View v) {
                 try {
                     NotifBubble.this.togglePin(item);
+                    // fixed127: the pinned card is no longer rebuilt
+                    // (refreshLevel1 freezes it), so flip the tapped
+                    // pin's icon in place.
+                    if (v instanceof ImageView) {
+                        ((ImageView) v).setImageBitmap(NotifBubble.this.pinBitmap(NotifBubble.this.isPinned(item)));
+                    }
                 } catch (Throwable th) {
                     NotifBubble.this.host.log("pin click failed", th);
                 }
