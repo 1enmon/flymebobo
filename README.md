@@ -1,4 +1,4 @@
-# 煤气泡 (BubbleNotify)
+# 煤气泡 (flymebobo)
 
 一个 LSPosed 模块，把通知、音乐、来电变成屏幕角落的气泡。
 
