@@ -158,7 +158,10 @@ public class NotifBubble implements BubbleFeature {
             try {
                 if (NotifBubble.this.level == 1 && !NotifBubble.this.items.isEmpty()) {
                     // fixed107: pinned card stays expanded — no auto-shrink.
-                    if (NotifBubble.this.isPinned(NotifBubble.this.currentCardItem())) {
+                    // fixed126: use isCardPinned() (any item of the card's
+                    // app), not just the top item, or a same-app new
+                    // notification would let the pinned card shrink.
+                    if (NotifBubble.this.isCardPinned()) {
                         return;
                     }
                     if (NotifBubble.this.activeReplyEdit != null && NotifBubble.this.activeReplyEdit.hasFocus()) {
@@ -207,6 +210,31 @@ public class NotifBubble implements BubbleFeature {
             }
         }
     };
+    // fixed126: pkg of the capsule overlaying a pinned card, to auto-dock it.
+    private String overlayDockPkg = null;
+    private final Runnable overlayDockRunnable = new Runnable() {
+        @Override
+        public void run() {
+            try {
+                // A new notification that arrived while a card was pinned
+                // shows as a capsule overlay; it must still auto-dock
+                // after 3s like any other capsule, without touching the
+                // pinned card (level stays 1).
+                if (NotifBubble.this.level == 1 && NotifBubble.this.isCardPinned()) {
+                    String pkg = NotifBubble.this.overlayDockPkg;
+                    if (pkg != null) {
+                        NotifBubble.this.dockedHiddenPkgs.add(pkg);
+                        NotifBubble.this.rebuildDocked(false);
+                        NotifBubble.this.applyDockedHidden();
+                        NotifBubble.this.host.updateWindowSize();
+                    }
+                }
+            } catch (Throwable th) {
+                NotifBubble.this.host.log("overlayDock failed", th);
+            }
+        }
+    };
+
     private final Runnable landscapeDockRunnable = new Runnable() { // from class: com.jarvis.bubblenotify.NotifBubble.3
         @Override // java.lang.Runnable
         public void run() {
@@ -644,6 +672,12 @@ public class NotifBubble implements BubbleFeature {
                     // visible; the card keeps the focus.
                     this.miniView.setVisibility(View.VISIBLE);
                 }
+                // fixed126: the overlay capsule must still auto-dock after
+                // 3s like any other capsule (scheduleMiniTimer only runs
+                // at level 2, so it never fires while the card is open).
+                this.overlayDockPkg = this.soloPkg;
+                this.host.getHandler().removeCallbacks(this.overlayDockRunnable);
+                this.host.getHandler().postDelayed(this.overlayDockRunnable, MINI_DOCK_MS);
                 refreshLevel1();
                 scheduleLevel1Timer();
                 return;
@@ -1286,8 +1320,24 @@ public class NotifBubble implements BubbleFeature {
     }
 
     // fixed110: is the currently expanded card pinned?
+    // fixed126: the pin is per-item (by key). A new notification from
+    // the SAME app becomes the card's top item with a different key, so
+    // checking only currentCardItem() would miss the pin and let the new
+    // notification replace the pinned card. The card is pinned if ANY
+    // of its displayed items (its app, expandedPkg) is pinned.
     private boolean isCardPinned() {
-        return this.level == 1 && isPinned(currentCardItem());
+        if (this.level != 1) {
+            return false;
+        }
+        if (this.expandedPkg != null) {
+            for (NotifItem it : this.items) {
+                if (this.expandedPkg.equals(it.pkg) && isPinned(it)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+        return isPinned(currentCardItem());
     }
 
     private String currentCardPkg() {
