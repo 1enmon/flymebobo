@@ -1209,6 +1209,33 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
+    // fixed128: refresh the lyric candidates from the currently active
+    // media notification. The candidates are otherwise only updated when
+    // a notification arrives (handleMediaNotification), but
+    // sendMusicStateFromController() also runs on MediaSession metadata
+    // changes (onMetadataChanged) — and a lyric line delivered through
+    // the metadata (DISPLAY_SUBTITLE) would then lose to a stale
+    // notification candidate. Re-reading the active notification keeps
+    // ticker/text/bigText fresh on every lyric pick.
+    private void refreshLyricCandidatesFromActive() {
+        try {
+            if (this.currentMediaKey == null) {
+                return;
+            }
+            StatusBarNotification[] active = getActiveNotifications();
+            if (active == null) {
+                return;
+            }
+            for (StatusBarNotification sbn : active) {
+                if (sbn != null && this.currentMediaKey.equals(sbn.getKey())) {
+                    updateLyricCandidates(sbn.getNotification(), true);
+                    return;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
     /**
      * Reads lyric candidates out of a media notification. Different apps hide the
      * current lyric line in different places: QQ Music uses android.text,
@@ -1439,6 +1466,11 @@ public class NotificationService extends NotificationListenerService {
                 // -> android.text (QQ Music) -> android.bigText ->
                 // DISPLAY_SUBTITLE; each must pass isLyricCandidate
                 // (not the title/artist/album-artist).
+                // fixed128: refresh the notification lyric candidates
+                // from the active notification first, so a metadata-driven
+                // update does not pick a stale notification line over the
+                // fresh DISPLAY_SUBTITLE.
+                refreshLyricCandidatesFromActive();
                 String subtitle = null;
                 try {
                     subtitle = metadata.getString("android.media.metadata.DISPLAY_SUBTITLE");

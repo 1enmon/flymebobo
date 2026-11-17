@@ -1320,6 +1320,10 @@ public class MusicBubble implements BubbleFeature {
             if (this.playBtn != null) {
                 this.playBtn.setIconXml(this.musicPlaying ? VectorIcons.PAUSE : VectorIcons.PLAY);
             }
+            // fixed128: the lyric line must refresh in place too — the
+            // old code only set it when the card was rebuilt, so the
+            // lyric stayed stuck on the line the card opened with.
+            updateLyricView();
             updateProgressUi();
         } catch (Throwable th) {
             log("updatePlayerContent failed", th);
