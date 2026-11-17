@@ -1,0 +1,20 @@
+# Build outputs
+*.apk
+*.ap_
+*.aab
+*.dex
+*.class
+*.jar
+out/
+build/
+dist/
+
+# Signing
+*.keystore
+*.jks
+
+# Local / IDE
+local.properties
+.idea/
+*.iml
+.DS_Store
