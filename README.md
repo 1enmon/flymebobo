@@ -38,8 +38,7 @@
 
 ## 参考与致谢
 
-- **Flyme灵动岛**（Flyme Island，`dev.shiyi.flymeisland`，作者拾忆）——本项目部分实现的参考来源（通知监听、来电拦截、小窗打开等），代码为独立重写。
-
+- **Flyme灵动岛**Flyme Island
 ## 免费模块声明
 
 本模块完全免费，喝咖啡纯属自愿。
