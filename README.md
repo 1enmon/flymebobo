@@ -23,7 +23,7 @@
 
 ## 安装
 
-1. 安装 APK
+1. 从 [Releases](https://github.com/1enmon/flymebobo/releases) 下载最新版 APK 安装
 2. 在 LSPosed 里启用「煤气泡」，作用域为 `com.android.systemui` 和 `com.android.incallui`
 3. 重启手机
 
@@ -38,7 +38,8 @@
 
 ## 参考与致谢
 
-- **Flyme灵动岛**Flyme Island
+- **Flyme灵动岛**（Flyme Island，`dev.shiyi.flymeisland`，作者拾忆）——本项目部分实现的参考来源（通知监听、来电拦截、小窗打开等），代码为独立重写。
+
 ## 免费模块声明
 
 本模块完全免费，喝咖啡纯属自愿。
@@ -49,6 +50,7 @@
 
 ## 链接
 
+- 下载：https://github.com/1enmon/flymebobo/releases
 - 酷安主页：https://www.coolapk.com/u/44111882
 
 ## 开源协议
