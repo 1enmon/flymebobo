@@ -1315,6 +1315,16 @@ public class BubbleManager implements BubbleHost {
         return this.enabled;
     }
 
+    // fixed129: is this dock child a (notification/player/call) card?
+    // Same width test removeDockView uses to tell a card from a capsule.
+    private boolean isCardView(View v) {
+        if (v == null) {
+            return false;
+        }
+        ViewGroup.LayoutParams lp = v.getLayoutParams();
+        return lp != null && (lp.width == dp(cardWidthDp()) || lp.width == dp(Settings.BUBBLE_WIDTH_LANDSCAPE_DP));
+    }
+
     @Override // com.jarvis.bubblenotify.BubbleHost
     public void addDockView(final View view) {
         LinearLayout.LayoutParams layoutParams;
@@ -1372,6 +1382,15 @@ public class BubbleManager implements BubbleHost {
             // (GONE) until the focus ends.
             BubbleFeature owner = ownerOf(view);
             Integer savedIndex = owner == null ? null : this.lastDockIndex.remove(owner);
+            // fixed129: a card is open and focused (e.g. a pinned card)
+            // — the saved slot predates the card, so restoring it would
+            // drop the new view on the edge side of the card and squeeze
+            // it. Fall through to the normal upper/lower rule instead:
+            // the new view lands on the centre side of the card (below
+            // it in the upper half, above it in the lower half).
+            if (savedIndex != null && isCardView(this.focusView)) {
+                savedIndex = null;
+            }
             int insertAt;
             if (savedIndex != null) {
                 insertAt = Math.min(savedIndex.intValue(), this.dock.getChildCount());
