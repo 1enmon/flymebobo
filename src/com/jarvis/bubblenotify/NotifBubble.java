@@ -1788,6 +1788,14 @@ public class NotifBubble implements BubbleFeature {
             @Override // com.jarvis.bubblenotify.NotifBubble.SwipeListener.Callback
             public void onSwipeRight() {
                 try {
+                    // fixed131: a pinned card stays put on a right-swipe —
+                    // it only docks after the user unpins it. showLevel3()
+                    // would tear the card down and rebuildDocked skips
+                    // pinned groups, so the card (and the pile rebuilt
+                    // around it) would vanish.
+                    if (NotifBubble.this.isCardPinned()) {
+                        return;
+                    }
                     // fixed30: card right-swipe now docks directly (level 3)
                     // instead of shrinking to the mini capsule (level 2).
                     if (NotifBubble.this.level1Container != null && NotifBubble.this.level == 1) {
@@ -2427,7 +2435,14 @@ public class NotifBubble implements BubbleFeature {
             public void onSwipeRight() {
                 try {
                     if (NotifBubble.this.level == 2 && !NotifBubble.this.items.isEmpty()) {
-                        NotifBubble.this.showLevel3();
+                        // fixed131: route through dockFromMini(), not
+                        // showLevel3(). showLevel3() tears the mini down
+                        // and rebuildDocked skips pinned groups, so a
+                        // pinned capsule swiped to dock vanished along
+                        // with the previously docked pile icons.
+                        // dockFromMini() keeps pinned capsules out and
+                        // only docks the unpinned ones.
+                        NotifBubble.this.dockFromMini();
                     }
                 } catch (Throwable th) {
                     NotifBubble.this.host.log("mini swipe right failed", th);
