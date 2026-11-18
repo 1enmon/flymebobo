@@ -591,7 +591,7 @@ public class MusicBubble implements BubbleFeature {
                 // pile, like a newly docking notification icon.
                 view.animate().cancel();
                 view.setTranslationY(dp(16));
-                view.animate().translationY(0.0f).setDuration(200L).start();
+                view.animate().withLayer().translationY(0.0f).setDuration(200L).start();
                 // fixed69: the pile closes as one unit — when the player
                 // docks, notification capsules dock with it. Guarded
                 // inside dockNotifsTogether (only level-2 notifications
@@ -810,7 +810,7 @@ public class MusicBubble implements BubbleFeature {
                         if (view.getWidth() > 0 && view.getHeight() > 0) {
                             view.setPivotX((float) view.getWidth());
                             view.setPivotY((float) view.getHeight());
-                            view.animate().alpha(1.0f).scaleX(1.0f).scaleY(1.0f).setDuration(200L).start();
+                            view.animate().withLayer().alpha(1.0f).scaleX(1.0f).scaleY(1.0f).setDuration(200L).start();
                         } else {
                             view.setAlpha(1.0f);
                             view.setScaleX(1.0f);
@@ -1474,12 +1474,16 @@ public class MusicBubble implements BubbleFeature {
             if (this.discView != null) {
                 this.discView.setAlbum(this.musicAlbum);
             }
+            // fixed134: pinned + lyric -> the whole capsule is the lyric:
+            // hide the status line so the lyric fills the capsule.
+            boolean pinnedLyric = this.playerPinned && this.musicLyric != null && !this.musicLyric.isEmpty();
             if (this.miniTextView != null) {
                 // fixed29: line 1 is the playback status ONLY — "正在播放"
                 // or "已暂停". No title, no artist, never the lyric.
                 this.miniTextView.setText(this.musicPlaying ? "正在播放" : "已暂停");
                 this.miniTextView.setEllipsize(TextUtils.TruncateAt.END);
                 this.miniTextView.setSelected(false);
+                this.miniTextView.setVisibility(pinnedLyric ? 8 : 0);
             }
             if (this.miniSubTextView != null) {
                 // fixed29: line 2, below the status, is the scrolling
@@ -1489,7 +1493,7 @@ public class MusicBubble implements BubbleFeature {
                 // line instead; unpinned -> "title - artist" as before.
                 // No lyric yet -> fall back to "title - artist".
                 String display;
-                if (this.playerPinned && this.musicLyric != null && !this.musicLyric.isEmpty()) {
+                if (pinnedLyric) {
                     display = this.musicLyric;
                 } else {
                     String title = (this.musicTitle == null || this.musicTitle.isEmpty()) ? "未知歌曲" : this.musicTitle;
@@ -1498,6 +1502,9 @@ public class MusicBubble implements BubbleFeature {
                         display = title + " - " + this.musicArtist;
                     }
                 }
+                // fixed134: pinned lyric -> bigger text (15sp, was 10sp);
+                // unpinned -> back to 10sp. Marquee + selected keep it scrolling.
+                this.miniSubTextView.setTextSize(2, pinnedLyric ? 15.0f : 10.0f);
                 if (!display.equals(this.miniSubTextView.getText().toString())) {
                     this.miniSubTextView.setText(display);
                 }
@@ -2097,7 +2104,7 @@ public class MusicBubble implements BubbleFeature {
                         }
                         float f2 = 84.0f * f;
                         if (this.dragging && x < 0.0f && ((-x) > f2 || xVelocity < -1000.0f)) {
-                            view.animate().translationX(-view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.MusicBubble.SwipeTapListener.1
+                            view.animate().withLayer().translationX(-view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.MusicBubble.SwipeTapListener.1
                                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                                 public void onAnimationEnd(Animator animator) {
                                     view.setTranslationX(0.0f);
@@ -2110,7 +2117,7 @@ public class MusicBubble implements BubbleFeature {
                                 }
                             }).start();
                         } else if (this.dragging && x > 0.0f && (x > f2 || xVelocity > 1000.0f)) {
-                            view.animate().translationX(view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.MusicBubble.SwipeTapListener.2
+                            view.animate().withLayer().translationX(view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.MusicBubble.SwipeTapListener.2
                                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                                 public void onAnimationEnd(Animator animator) {
                                     view.setTranslationX(0.0f);
@@ -2123,7 +2130,7 @@ public class MusicBubble implements BubbleFeature {
                                 }
                             }).start();
                         } else if (this.dragging) {
-                            view.animate().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
+                            view.animate().withLayer().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
                         } else if (jUptimeMillis < 500 && Math.abs(x) < f * 10.0f) {
                             this.callback.onTap();
                         }
@@ -2155,7 +2162,7 @@ public class MusicBubble implements BubbleFeature {
                             this.callback.onDragEnd();
                         }
                         if (this.dragging) {
-                            view.animate().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
+                            view.animate().withLayer().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
                         }
                         return true;
                     default:

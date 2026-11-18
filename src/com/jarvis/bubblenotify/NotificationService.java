@@ -208,12 +208,228 @@ public class NotificationService extends NotificationListenerService {
      *  package's last notification had the identical fingerprint
      *  (id:postTime:title/text). A repeat fingerprint is a re-delivery of
      *  the exact same notification — drop it with zero action. */
-    private boolean isRepeatNotifFingerprint(String pkg, android.service.notification.StatusBarNotification sbn, String title, String text) {
+    /** fixed136: parse a percent from notification text, e.g. "45%",
+     *  "已下载45%", "12.5MB/50MB", "12/50". Returns 0-100, or -1. */
+    // fixed140: download tick interval — same 1s cadence as the music
+    // player tick. The player polls the MediaSession; downloads poll
+    // getActiveNotifications() for the live progress.
+    private static final long DOWNLOAD_TICK_MS = 1000;
+
+    // fixed140: read live download progress from a Notification with
+    // the same multi-source logic as onNotificationPosted (extras +
+    // RemoteViews + text percent, highest wins). Returns
+    // {progress, progressMax, indeterminate(0/1)} or null if the
+    // notification carries no progress.
+    private static int[] readDownloadProgress(Notification n, String title, String text) {
+        if (n == null) {
+            return null;
+        }
+        Bundle b = n.extras;
+        int prog = b != null ? b.getInt("android.progress", 0) : 0;
+        int progMax = b != null ? b.getInt("android.progressMax", 0) : 0;
+        boolean ind = b != null && b.getBoolean("android.progressIndeterminate", false);
+        int[] rv = readProgressFromRemoteViews(n);
+        if (rv != null) {
+            int rvPct = (rv[0] * 100) / rv[1];
+            int exPct = progMax > 0 ? (prog * 100) / progMax : -1;
+            if (rvPct > exPct) {
+                prog = rv[0];
+                progMax = rv[1];
+            }
+        }
+        int textPct = parseProgressPercent(text);
+        if (textPct < 0) {
+            textPct = parseProgressPercent(title);
+        }
+        if (textPct >= 0) {
+            int curPct = progMax > 0 ? (prog * 100) / progMax : -1;
+            if (textPct > curPct) {
+                if (progMax > 0) {
+                    prog = (textPct * progMax) / 100;
+                } else {
+                    progMax = 100;
+                    prog = textPct;
+                }
+                ind = false;
+            }
+        }
+        if (progMax <= 0 && !ind) {
+            return null;
+        }
+        return new int[]{prog, progMax, ind ? 1 : 0};
+    }
+
+    // fixed140: while a download is in progress, poll the live
+    // notification state every second and push the update to the
+    // bubble when the progress moved. Re-posts itself while any
+    // download is still active, stops when none is.
+    private final Runnable downloadTickRunnable = new Runnable() {
+        @Override
+        public void run() {
+            boolean changed = false;
+            boolean anyActive = false;
+            try {
+                StatusBarNotification[] active = getActiveNotifications();
+                if (active != null) {
+                    for (StatusBarNotification sbn : active) {
+                        if (sbn == null || sbn.getNotification() == null || sbn.getKey() == null) {
+                            continue;
+                        }
+                        RecentNotif target = null;
+                        synchronized (recentNotifs) {
+                            for (RecentNotif r : recentNotifs) {
+                                if (sbn.getKey().equals(r.key)) {
+                                    target = r;
+                                    break;
+                                }
+                            }
+                        }
+                        if (target == null) {
+                            continue;
+                        }
+                        if (!(target.progressMax > 0 || target.progressIndeterminate)) {
+                            continue;
+                        }
+                        Notification n = sbn.getNotification();
+                        Bundle b = n.extras;
+                        String title = getText(b, "android.title");
+                        String text = getText(b, "android.text");
+                        if (text == null || text.isEmpty()) {
+                            text = getText(b, "android.bigText");
+                        }
+                        int[] pr = readDownloadProgress(n, title, text);
+                        if (pr == null) {
+                            continue;
+                        }
+                        boolean ind = pr[2] != 0;
+                        if (pr[0] != target.progress || pr[1] != target.progressMax || ind != target.progressIndeterminate) {
+                            target.progress = pr[0];
+                            target.progressMax = pr[1];
+                            target.progressIndeterminate = ind;
+                            changed = true;
+                        }
+                        if (ind || (pr[1] > 0 && pr[0] < pr[1])) {
+                            anyActive = true;
+                        }
+                    }
+                }
+                synchronized (recentNotifs) {
+                    for (RecentNotif r : recentNotifs) {
+                        if ((r.progressMax > 0 || r.progressIndeterminate) && (r.progressIndeterminate || r.progress < r.progressMax)) {
+                            anyActive = true;
+                            break;
+                        }
+                    }
+                }
+            } catch (Throwable th) {
+                Log.e(Settings.TAG, "download tick failed", th);
+            }
+            if (changed) {
+                broadcastNotifyList();
+            }
+            if (anyActive) {
+                mainHandler.postDelayed(this, DOWNLOAD_TICK_MS);
+            }
+        }
+    };
+
+    private void scheduleDownloadTick() {
+        boolean any = false;
+        synchronized (recentNotifs) {
+            for (RecentNotif r : recentNotifs) {
+                if ((r.progressMax > 0 || r.progressIndeterminate) && (r.progressIndeterminate || r.progress < r.progressMax)) {
+                    any = true;
+                    break;
+                }
+            }
+        }
+        if (any) {
+            mainHandler.removeCallbacks(downloadTickRunnable);
+            mainHandler.postDelayed(downloadTickRunnable, DOWNLOAD_TICK_MS);
+        }
+    }
+
+    private static int parseProgressPercent(String s) {
+        if (s == null || s.isEmpty()) {
+            return -1;
+        }
+        try {
+            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%").matcher(s);
+            if (m.find()) {
+                float f = Float.parseFloat(m.group(1));
+                if (f >= 0.0f && f <= 100.0f) {
+                    return Math.round(f);
+                }
+            }
+            m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(?:MB|KB|GB|B)?\\s*/\\s*(\\d+(?:\\.\\d+)?)\\s*(?:MB|KB|GB|B)?").matcher(s);
+            if (m.find()) {
+                float a = Float.parseFloat(m.group(1));
+                float b = Float.parseFloat(m.group(2));
+                if (b > 0.0f && a >= 0.0f && a <= b) {
+                    return Math.round((a * 100.0f) / b);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return -1;
+    }
+
+    /** fixed136: read the ProgressBar from the notification RemoteViews.
+     *  Custom download notifications update the bar in the RemoteViews
+     *  but leave the extras at 0. Returns {progress, max} or null. */
+    private static int[] readProgressFromRemoteViews(Notification n) {
+        try {
+            android.widget.RemoteViews rv = n.contentView;
+            if (rv == null) {
+                rv = n.bigContentView;
+            }
+            if (rv == null) {
+                return null;
+            }
+            java.lang.reflect.Field f = android.widget.RemoteViews.class.getDeclaredField("mActions");
+            f.setAccessible(true);
+            java.util.ArrayList actions = (java.util.ArrayList) f.get(rv);
+            if (actions == null) {
+                return null;
+            }
+            int max = -1;
+            int prog = -1;
+            for (Object a : actions) {
+                if (a == null) {
+                    continue;
+                }
+                Class c = a.getClass();
+                if (!c.getSimpleName().equals("ReflectionAction")) {
+                    continue;
+                }
+                java.lang.reflect.Field mf = c.getDeclaredField("methodName");
+                mf.setAccessible(true);
+                String method = (String) mf.get(a);
+                java.lang.reflect.Field vf = c.getDeclaredField("value");
+                vf.setAccessible(true);
+                Object v = vf.get(a);
+                if ("setMax".equals(method) && (v instanceof Number)) {
+                    max = ((Number) v).intValue();
+                } else if ("setProgress".equals(method) && (v instanceof Number)) {
+                    prog = ((Number) v).intValue();
+                }
+            }
+            if (max > 0 && prog >= 0) {
+                return new int[]{prog, max};
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    private boolean isRepeatNotifFingerprint(String pkg, android.service.notification.StatusBarNotification sbn, String title, String text, int progress, int progressMax) {
         if (pkg == null || sbn == null) {
             return false;
         }
         try {
-            String fp = sbn.getId() + ":" + sbn.getPostTime() + ":" + (title == null ? "" : title) + "/" + (text == null ? "" : text);
+            // fixed136: include progress, so a progress change is not a
+            // repeat even if postTime/title/text are unchanged.
+            String fp = sbn.getId() + ":" + sbn.getPostTime() + ":" + (title == null ? "" : title) + "/" + (text == null ? "" : text) + ":" + progress + "/" + progressMax;
             synchronized (this.lastNotifFingerprintByPkg) {
                 String last = this.lastNotifFingerprintByPkg.get(pkg);
                 if (fp.equals(last)) {
@@ -233,12 +449,15 @@ public class NotificationService extends NotificationListenerService {
      *  the same person. Only same key AND same title+text is a repeat
      *  (identical re-delivery); new content under the same key is a new
      *  notification and pops once. */
-    private boolean isRepeatNotifKey(String key, String title, String text) {
+    private boolean isRepeatNotifKey(String key, String title, String text, int progress, int progressMax) {
         if (key == null) {
             return false;
         }
         try {
-            String content = (title == null ? "" : title) + "\u0001" + (text == null ? "" : text);
+            // fixed133: include progress in the content, so a progress update
+            // (same key/title/text, new progress) counts as new content and
+            // refreshes the bubble instead of being dropped as a duplicate.
+            String content = (title == null ? "" : title) + "\u0001" + (text == null ? "" : text) + "\u0001" + progress + "/" + progressMax;
             long now = SystemClock.uptimeMillis();
             synchronized (this.seenNotifKeys) {
                 Long last = this.seenNotifKeys.get(key);
@@ -604,6 +823,9 @@ public class NotificationService extends NotificationListenerService {
         String text;
         long time;
         String title;
+        int progress;
+        int progressMax;
+        boolean progressIndeterminate;
 
         private RecentNotif() {
         }
@@ -651,7 +873,12 @@ public class NotificationService extends NotificationListenerService {
                                 if (tx == null || tx.isEmpty()) {
                                     tx = getText(b, "android.bigText");
                                 }
-                                this.seenNotifKeyContent.put(sbn.getKey(), (t == null ? "" : t) + "\u0001" + (tx == null ? "" : tx));
+                                // fixed133: seed the same progress-suffixed content
+                                // as isRepeatNotifKey, so a re-delivered progress
+                                // notification does not re-pop after reconnect.
+                                int seedProgress = b != null ? b.getInt("android.progress", 0) : 0;
+                                int seedProgressMax = b != null ? b.getInt("android.progressMax", 0) : 0;
+                                this.seenNotifKeyContent.put(sbn.getKey(), (t == null ? "" : t) + "\u0001" + (tx == null ? "" : tx) + "\u0001" + seedProgress + "/" + seedProgressMax);
                             } catch (Throwable ignored) {
                             }
                         }
@@ -741,13 +968,34 @@ public class NotificationService extends NotificationListenerService {
             // Its ongoing nav post is exempt from the ongoing skip, like
             // Meituan/Eleme, so it still shows as a capsule.
             boolean isDeliveryOrder = Settings.PKG_MEITUAN.equals(packageName) || Settings.PKG_ELEME.equals(packageName) || Settings.PKG_AMAP.equals(packageName);
+            // fixed133: download progress — a notification carrying progress
+            // (android.progress / android.progressMax / android.progressIndeterminate)
+            // is a download (or other long task) in progress. It is ongoing
+            // by definition, so exempt it from the ongoing skip like a
+            // delivery order; the bubble shows the progress bar.
+            int notifProgress = bundle != null ? bundle.getInt("android.progress", 0) : 0;
+            int notifProgressMax = bundle != null ? bundle.getInt("android.progressMax", 0) : 0;
+            boolean notifProgressIndeterminate = bundle != null && bundle.getBoolean("android.progressIndeterminate", false);
+            // fixed136: the extras are often stale at 0 while the live
+            // progress is in the RemoteViews ProgressBar. Take the
+            // highest percent across sources (progress only increases).
+            int[] rvProgress = readProgressFromRemoteViews(notification);
+            if (rvProgress != null) {
+                int rvPct = (rvProgress[0] * 100) / rvProgress[1];
+                int exPct = notifProgressMax > 0 ? (notifProgress * 100) / notifProgressMax : -1;
+                if (rvPct > exPct) {
+                    notifProgress = rvProgress[0];
+                    notifProgressMax = rvProgress[1];
+                }
+            }
+            boolean hasProgress = notifProgressMax > 0 || notifProgressIndeterminate;
             // fixed55: this skip used to be silent — a BOSS直聘/鱼泡直聘
             // notification sits in the shade but never bubbles, and the
             // log showed nothing. Log it so the drop reason is visible.
-            if (isOngoing(notification) && !isDeliveryOrder) {
+            if (isOngoing(notification) && !isDeliveryOrder && !hasProgress) {
                 FileLog.i("Notification skipped: ongoing, not delivery: " + packageName + " flags=" + notification.flags);
             }
-            if ((!isOngoing(notification) || isDeliveryOrder) && !Settings.SYSTEMUI_PACKAGE.equals(packageName) && !"android".equals(packageName)) {
+            if ((!isOngoing(notification) || isDeliveryOrder || hasProgress) && !Settings.SYSTEMUI_PACKAGE.equals(packageName) && !"android".equals(packageName)) {
                 String text = getText(bundle, "android.title");
                 String text2 = getText(bundle, "android.text");
                 if (text2 == null || text2.isEmpty()) {
@@ -782,13 +1030,34 @@ public class NotificationService extends NotificationListenerService {
                     FileLog.i("Notification dropped: empty title and text: " + packageName + " flags=" + notification.flags);
                 }
                 if ((text != null && !text.isEmpty()) || (text2 != null && !text2.isEmpty())) {
+                    // fixed136: refine progress from the text ("45%",
+                    // "12MB/50MB") — the text often carries the live
+                    // percent while the extras stay at 0. Highest wins.
+                    int textPct = parseProgressPercent(text2);
+                    if (textPct < 0) {
+                        textPct = parseProgressPercent(text);
+                    }
+                    if (textPct >= 0) {
+                        int curPct = notifProgressMax > 0 ? (notifProgress * 100) / notifProgressMax : -1;
+                        if (textPct > curPct) {
+                            if (notifProgressMax > 0) {
+                                notifProgress = (textPct * notifProgressMax) / 100;
+                            } else {
+                                notifProgressMax = 100;
+                                notifProgress = textPct;
+                            }
+                            hasProgress = true;
+                        }
+                    }
                     // fixed28 (ported from Flyme Island 1.0.38-r3 V()): drop
                     // stale notifications — postTime more than 5s ago means
                     // the system re-delivered an old notification (e.g. after
                     // the listener service reconnected). This is Flyme's STALE
                     // check, as a single absolute window instead of a
                     // per-key postTime comparison.
-                    if (System.currentTimeMillis() - statusBarNotification.getPostTime() > 5000) {
+                    // fixed136: a download lasts minutes — exempt progress
+                    // notifications, or every update after 5s is dropped.
+                    if (!hasProgress && System.currentTimeMillis() - statusBarNotification.getPostTime() > 5000) {
                         FileLog.i("Stale notification dropped (>5s old): " + packageName);
                         return;
                     }
@@ -802,7 +1071,21 @@ public class NotificationService extends NotificationListenerService {
                     // fixed31: delivery notifications are ordinary now, so
                     // exempt them from the ongoing bit only (mask 576 =
                     // 0x240: foreground-service | group-summary still drop).
-                    int dropMask = isDeliveryOrder ? 576 : 578;
+                    // fixed135: progress notifications are ongoing by
+                    // definition — exempt them from the ongoing bit of
+                    // the flags mask (576, like a delivery order), or
+                    // every progress update is dropped here and the
+                    // bubble stays at the first 0% state.
+                    // fixed137: app-store downloads run as a foreground
+                    // service, so the download notification carries
+                    // FLAG_FOREGROUND_SERVICE (0x40). 576 still includes
+                    // that bit, so the main path kept dropping these and
+                    // only the fallback delivered the first 0% state.
+                    // For progress notifications the mask is 512
+                    // (GROUP_SUMMARY only) — ongoing and foreground-
+                    // service are both exempt; a group summary is still
+                    // dropped (redundant once its children are shown).
+                    int dropMask = hasProgress ? 512 : (isDeliveryOrder ? 576 : 578);
                     if ((notification.flags & dropMask) != 0) {
                         FileLog.i("Notification dropped by flags mask " + dropMask + ": " + packageName);
                         return;
@@ -811,11 +1094,11 @@ public class NotificationService extends NotificationListenerService {
                     // per-package fingerprint gate. Identical id:postTime:
                     // title/text means the exact same notification was
                     // re-delivered — drop with zero action.
-                    if (isRepeatNotifFingerprint(packageName, statusBarNotification, text, text2)) {
+                    if (isRepeatNotifFingerprint(packageName, statusBarNotification, text, text2, notifProgress, notifProgressMax)) {
                         FileLog.i("Repeat notification fingerprint dropped: " + packageName);
                         return;
                     }
-                    if (isRepeatNotifKey(statusBarNotification.getKey(), text, text2)) {
+                    if (isRepeatNotifKey(statusBarNotification.getKey(), text, text2, notifProgress, notifProgressMax)) {
                         FileLog.i("Repeat notification key dropped: " + statusBarNotification.getKey());
                         return;
                     }
@@ -823,7 +1106,12 @@ public class NotificationService extends NotificationListenerService {
                         FileLog.i("Redundant message dropped (already seen): " + packageName);
                         return;
                     }
-                    if (isDuplicateNotif(packageName, text, text2)) {
+                    // fixed135: a progress update has the same title/text
+                    // as the last one, so isDuplicateNotif would drop it
+                    // as a duplicate within its 15s window. Skip it for
+                    // progress notifications — isRepeatNotifKey is already
+                    // progress-aware and still catches exact duplicates.
+                    if (!hasProgress && isDuplicateNotif(packageName, text, text2)) {
                         FileLog.i("Duplicate notification dropped: " + packageName);
                         return;
                     }
@@ -839,6 +1127,9 @@ public class NotificationService extends NotificationListenerService {
                     recentNotif.pkg = packageName;
                     recentNotif.intent = notification.contentIntent;
                     recentNotif.time = statusBarNotification.getPostTime();
+                    recentNotif.progress = notifProgress;
+                    recentNotif.progressMax = notifProgressMax;
+                    recentNotif.progressIndeterminate = notifProgressIndeterminate;
                     if (notification.actions != null) {
                         for (Notification.Action action : notification.actions) {
                             if (action != null && action.actionIntent != null && action.getRemoteInputs() != null && action.getRemoteInputs().length > 0) {
@@ -887,6 +1178,10 @@ public class NotificationService extends NotificationListenerService {
                         }
                     }
                     broadcastNotifyList();
+                    // fixed140: start the download tick while a
+                    // download is in progress (polls live progress
+                    // like the player tick polls the MediaSession).
+                    scheduleDownloadTick();
                     Log.i(Settings.TAG, "Notification posted: " + packageName);
                     // fixed71: local code recognition — the old AiClient
                     // sent the notification to a remote AI endpoint; the
@@ -1021,6 +1316,11 @@ public class NotificationService extends NotificationListenerService {
                 bundle.putString(Settings.ITEM_TEXT, recentNotif.text);
                 bundle.putString(Settings.ITEM_PACKAGE, recentNotif.pkg);
                 bundle.putLong(Settings.ITEM_TIME, recentNotif.time);
+                if (recentNotif.progressMax > 0 || recentNotif.progressIndeterminate) {
+                    bundle.putInt(Settings.ITEM_PROGRESS, recentNotif.progress);
+                    bundle.putInt(Settings.ITEM_PROGRESS_MAX, recentNotif.progressMax);
+                    bundle.putBoolean(Settings.ITEM_PROGRESS_INDETERMINATE, recentNotif.progressIndeterminate);
+                }
                 if (recentNotif.icon != null) {
                     bundle.putParcelable(Settings.ITEM_ICON, recentNotif.icon);
                 }

@@ -187,6 +187,17 @@ public class NotifBubble implements BubbleFeature {
                         NotifBubble.this.host.getHandler().postDelayed(this, MINI_DOCK_MS);
                         return;
                     }
+                    // fixed139: a download in progress keeps its
+                    // capsule out — do not auto-dock while any item
+                    // is still downloading. Re-check later so it
+                    // docks normally once the download finishes, and
+                    // refreshMini() keeps updating the percentage in
+                    // place meanwhile. Manual swipe-to-dock/dismiss
+                    // is untouched; only the automatic timer is held.
+                    if (NotifBubble.this.anyDownloading()) {
+                        NotifBubble.this.host.getHandler().postDelayed(this, MINI_DOCK_MS);
+                        return;
+                    }
                     // fixed111: a pin is counted separately — while a
                     // pin is active, the OTHER (unpinned) capsules
                     // still auto-shrink and auto-dock normally: their
@@ -274,6 +285,9 @@ public class NotifBubble implements BubbleFeature {
         String text;
         long time;
         String title;
+        int progress;
+        int progressMax;
+        boolean progressIndeterminate;
 
         private NotifItem() {
         }
@@ -347,6 +361,9 @@ public class NotifBubble implements BubbleFeature {
                         notifItem2.text = bundle.getString(Settings.ITEM_TEXT);
                         notifItem2.pkg = bundle.getString(Settings.ITEM_PACKAGE);
                         notifItem2.time = bundle.getLong(Settings.ITEM_TIME, System.currentTimeMillis());
+                        notifItem2.progress = bundle.getInt(Settings.ITEM_PROGRESS, 0);
+                        notifItem2.progressMax = bundle.getInt(Settings.ITEM_PROGRESS_MAX, 0);
+                        notifItem2.progressIndeterminate = bundle.getBoolean(Settings.ITEM_PROGRESS_INDETERMINATE, false);
                         try {
                             notifItem2.icon = (Bitmap) bundle.getParcelable(Settings.ITEM_ICON);
                         } catch (Throwable th) {
@@ -439,6 +456,9 @@ public class NotifBubble implements BubbleFeature {
                     item.title = bundle.getString(Settings.ITEM_TITLE);
                     item.text = bundle.getString(Settings.ITEM_TEXT);
                     item.time = bundle.getLong(Settings.ITEM_TIME, System.currentTimeMillis());
+                    item.progress = bundle.getInt(Settings.ITEM_PROGRESS, 0);
+                    item.progressMax = bundle.getInt(Settings.ITEM_PROGRESS_MAX, 0);
+                    item.progressIndeterminate = bundle.getBoolean(Settings.ITEM_PROGRESS_INDETERMINATE, false);
                     try {
                         item.intent = (PendingIntent) bundle.getParcelable(Settings.ITEM_INTENT);
                     } catch (Throwable ignored) {
@@ -453,6 +473,9 @@ public class NotifBubble implements BubbleFeature {
             notifItem.text = bundle.getString(Settings.ITEM_TEXT);
             notifItem.pkg = bundle.getString(Settings.ITEM_PACKAGE);
             notifItem.time = bundle.getLong(Settings.ITEM_TIME, System.currentTimeMillis());
+            notifItem.progress = bundle.getInt(Settings.ITEM_PROGRESS, 0);
+            notifItem.progressMax = bundle.getInt(Settings.ITEM_PROGRESS_MAX, 0);
+            notifItem.progressIndeterminate = bundle.getBoolean(Settings.ITEM_PROGRESS_INDETERMINATE, false);
             try {
                 notifItem.icon = (Bitmap) bundle.getParcelable(Settings.ITEM_ICON);
             } catch (Throwable ignored) {
@@ -880,7 +903,7 @@ public class NotifBubble implements BubbleFeature {
             shrinkCard.setPivotY(0.0f);
             shrinkCard.setTranslationX(0.0f);
             shrinkCard.setTranslationY(0.0f);
-            shrinkCard.animate().scaleX(shrinkScale).scaleY(shrinkScale).translationX(tx).translationY(ty).alpha(0.0f).setDuration(ENTER_ANIM_MS).setListener(new AnimatorListenerAdapter() {
+            shrinkCard.animate().withLayer().scaleX(shrinkScale).scaleY(shrinkScale).translationX(tx).translationY(ty).alpha(0.0f).setDuration(ENTER_ANIM_MS).setListener(new AnimatorListenerAdapter() {
                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                 public void onAnimationEnd(Animator animator) {
                     try {
@@ -1384,6 +1407,22 @@ public class NotifBubble implements BubbleFeature {
         return null;
     }
 
+    // fixed132: minimal unpin for a manual swipe-to-dock. The pin only
+    // blocks the 3s auto-dock; a manual swipe is an explicit dock, so the
+    // pin comes off first and the item docks normally into the pile.
+    // No level refresh here — the dock call that follows rebuilds
+    // everything anyway (togglePin's refresh would rebuild the card
+    // mid-swipe and break the dock animation's container check).
+    private void unpinForDock(NotifItem item) {
+        if (item == null || item.key == null) {
+            return;
+        }
+        this.pinnedKeys.remove(item.key);
+        if (item.pkg != null && item.pkg.equals(this.pinnedCardPkg)) {
+            this.pinnedCardPkg = null;
+        }
+    }
+
     private void togglePin(NotifItem item) {
         if (item == null || item.key == null) {
             return;
@@ -1618,11 +1657,57 @@ public class NotifBubble implements BubbleFeature {
         }
     }
 
+    /** fixed133: true if this item carries download/task progress. */
+    private static boolean hasProgress(NotifItem item) {
+        return item != null && (item.progressMax > 0 || item.progressIndeterminate);
+    }
+
+    /** fixed139: a download is in progress while it has progress and
+     * has not reached its max (indeterminate counts as in progress). */
+    private static boolean isDownloading(NotifItem item) {
+        return item != null && (item.progressMax > 0 || item.progressIndeterminate)
+                && (item.progressIndeterminate || item.progress < item.progressMax);
+    }
+
+    private boolean anyDownloading() {
+        for (NotifItem item : this.items) {
+            if (isDownloading(item)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /** fixed133: progress percent 0-100, or -1 for indeterminate / none. */
+    private static int progressPercent(NotifItem item) {
+        if (item == null || item.progressMax <= 0) {
+            return -1;
+        }
+        int p = item.progress * 100 / item.progressMax;
+        if (p < 0) {
+            return 0;
+        }
+        if (p > 100) {
+            return 100;
+        }
+        return p;
+    }
+
     private View buildCard(final NotifItem notifItem) {
         FrameLayout frameLayout = new FrameLayout(this.ctx);
         frameLayout.setClipChildren(false);
+        // fixed138: mirror the drag-hint arrows with the dock side.
+        // Dock on the right: swipe right to dock ("缩小 ›"), swipe left
+        // to dismiss ("‹ 取消"). Dock on the left: the actions swap,
+        // so the arrows swap too ("‹ 缩小" / "取消 ›").
+        boolean tmpMirror = false;
+        try {
+            tmpMirror = this.host.isDockLeft();
+        } catch (Throwable ignored) {
+        }
+        final boolean hintMirror = tmpMirror;
         final TextView textView = new TextView(this.ctx);
-        textView.setText("缩小 ›");
+        textView.setText(hintMirror ? "‹ 缩小" : "缩小 ›");
         textView.setTextSize(2, 13.0f);
         textView.setTypeface(Typeface.DEFAULT_BOLD);
         textView.setTextColor(-15961500);
@@ -1631,7 +1716,7 @@ public class NotifBubble implements BubbleFeature {
         textView.setVisibility(8);
         frameLayout.addView(textView, new FrameLayout.LayoutParams(-1, -1));
         final TextView textView2 = new TextView(this.ctx);
-        textView2.setText("‹ 取消");
+        textView2.setText(hintMirror ? "取消 ›" : "‹ 取消");
         textView2.setTextSize(2, 13.0f);
         textView2.setTypeface(Typeface.DEFAULT_BOLD);
         textView2.setTextColor(HINT_DISMISS);
@@ -1730,6 +1815,34 @@ public class NotifBubble implements BubbleFeature {
             layoutParams5.topMargin = this.host.dp(8);
             linearLayout.addView(textView8, layoutParams5);
         }
+        // fixed133: download/task progress bar + percent in the card.
+        if (hasProgress(notifItem)) {
+            LinearLayout progressRow = new LinearLayout(this.ctx);
+            progressRow.setOrientation(0);
+            progressRow.setGravity(16);
+            LinearLayout.LayoutParams progressRowLp = new LinearLayout.LayoutParams(-1, -2);
+            progressRowLp.topMargin = this.host.dp(8);
+            android.widget.ProgressBar progressBar = new android.widget.ProgressBar(this.ctx, null, android.R.attr.progressBarStyleHorizontal);
+            if (notifItem.progressIndeterminate || notifItem.progressMax <= 0) {
+                progressBar.setIndeterminate(true);
+            } else {
+                progressBar.setMax(notifItem.progressMax);
+                progressBar.setProgress(notifItem.progress);
+            }
+            LinearLayout.LayoutParams progressBarLp = new LinearLayout.LayoutParams(0, -2, 1.0f);
+            progressRow.addView(progressBar, progressBarLp);
+            int cardPct = progressPercent(notifItem);
+            if (cardPct >= 0) {
+                TextView pctView = new TextView(this.ctx);
+                pctView.setText(cardPct + "%");
+                pctView.setTextSize(2, 12.0f);
+                pctView.setTextColor(this.host.textSubColor());
+                LinearLayout.LayoutParams pctLp = new LinearLayout.LayoutParams(-2, -2);
+                pctLp.leftMargin = this.host.dp(8);
+                progressRow.addView(pctView, pctLp);
+            }
+            linearLayout.addView(progressRow, progressRowLp);
+        }
         if (notifItem.replyIntent != null && notifItem.replyKey != null) {
             linearLayout.addView(buildReplyRow(notifItem));
         }
@@ -1788,19 +1901,20 @@ public class NotifBubble implements BubbleFeature {
             @Override // com.jarvis.bubblenotify.NotifBubble.SwipeListener.Callback
             public void onSwipeRight() {
                 try {
-                    // fixed131: a pinned card stays put on a right-swipe —
-                    // it only docks after the user unpins it. showLevel3()
-                    // would tear the card down and rebuildDocked skips
-                    // pinned groups, so the card (and the pile rebuilt
-                    // around it) would vanish.
+                    // fixed132: swiping a pinned card to dock auto-unpins
+                    // it first (user: "钉住后滑动自动解除钉住"). The pin
+                    // only blocks the 3s auto-dock; a manual swipe docks
+                    // the card into the pile, so the pin comes off and
+                    // rebuildDocked includes the group (previously the
+                    // pinned group was skipped and the pile lost icons).
                     if (NotifBubble.this.isCardPinned()) {
-                        return;
+                        NotifBubble.this.unpinForDock(NotifBubble.this.currentCardItem());
                     }
                     // fixed30: card right-swipe now docks directly (level 3)
                     // instead of shrinking to the mini capsule (level 2).
                     if (NotifBubble.this.level1Container != null && NotifBubble.this.level == 1) {
                         final View linearLayout3 = NotifBubble.this.level1Container;
-                        linearLayout3.animate().translationX(NotifBubble.this.host.dp(120)).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.5.1
+                        linearLayout3.animate().withLayer().translationX(NotifBubble.this.host.dp(120)).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.5.1
                             @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                             public void onAnimationEnd(Animator animator) {
                                 linearLayout3.setTranslationX(0.0f);
@@ -1840,20 +1954,26 @@ public class NotifBubble implements BubbleFeature {
             @Override // com.jarvis.bubblenotify.NotifBubble.SwipeListener.Callback
             public void onDragProgress(float f) {
                 int iDp = NotifBubble.this.host.dp(28);
-                if (f < (-iDp)) {
+                // fixed138: mirror the drag hints with the dock side.
+                // f is the physical displacement; the dock action is a
+                // rightward drag on the right edge and a leftward drag
+                // on the left edge. Show the dock hint + blue border for
+                // a drag toward the dock edge, the dismiss hint + red
+                // border for a drag away from it.
+                boolean dockDrag = hintMirror ? f < (-iDp) : f > iDp;
+                boolean dismissDrag = hintMirror ? f > iDp : f < (-iDp);
+                if (dismissDrag) {
                     textView2.setVisibility(0);
                     textView.setVisibility(8);
                     gradientDrawableFrostedBackground.setStroke(NotifBubble.this.host.dp(1), NotifBubble.HINT_DISMISS);
                     return;
                 }
-                float f2 = iDp;
-                TextView textView8 = textView;
-                if (f > f2) {
-                    textView8.setVisibility(0);
+                if (dockDrag) {
+                    textView.setVisibility(0);
                     textView2.setVisibility(8);
                     gradientDrawableFrostedBackground.setStroke(NotifBubble.this.host.dp(1), -15961500);
                 } else {
-                    textView8.setVisibility(8);
+                    textView.setVisibility(8);
                     textView2.setVisibility(8);
                     gradientDrawableFrostedBackground.setStroke(NotifBubble.this.host.dp(1), NotifBubble.this.host.borderColor());
                 }
@@ -2346,13 +2466,20 @@ public class NotifBubble implements BubbleFeature {
         linearLayout2.addView(textView);
         TextView textView2 = new TextView(this.ctx);
         CodeInfo codeInfo = topItem.key != null ? this.codes.get(topItem.key) : null;
+        String miniSub;
         if (codeInfo != null) {
-            textView2.setText(codeInfo.kind + " " + codeInfo.code);
+            miniSub = codeInfo.kind + " " + codeInfo.code;
         } else if (topItem.title != null && !topItem.title.isEmpty()) {
-            textView2.setText(topItem.title);
+            miniSub = topItem.title;
         } else {
-            textView2.setText(topItem.text != null ? topItem.text : "");
+            miniSub = topItem.text != null ? topItem.text : "";
         }
+        // fixed133: show download progress percent in the capsule second line.
+        int miniPct = progressPercent(topItem);
+        if (miniPct >= 0) {
+            miniSub = miniSub + " " + miniPct + "%";
+        }
+        textView2.setText(miniSub);
         textView2.setTextSize(2, 11.0f);
         textView2.setTextColor(this.host.textSubColor());
         textView2.setSingleLine(true);
@@ -2435,13 +2562,16 @@ public class NotifBubble implements BubbleFeature {
             public void onSwipeRight() {
                 try {
                     if (NotifBubble.this.level == 2 && !NotifBubble.this.items.isEmpty()) {
-                        // fixed131: route through dockFromMini(), not
-                        // showLevel3(). showLevel3() tears the mini down
-                        // and rebuildDocked skips pinned groups, so a
-                        // pinned capsule swiped to dock vanished along
-                        // with the previously docked pile icons.
-                        // dockFromMini() keeps pinned capsules out and
-                        // only docks the unpinned ones.
+                        // fixed132: swiping a pinned capsule to dock
+                        // auto-unpins it first (user: "钉住后滑动自动解除
+                        // 钉住"). The pin only blocks the 3s auto-dock;
+                        // a manual swipe docks the capsule into the pile,
+                        // so the pin comes off and rebuildDocked includes
+                        // the group (previously the pinned group was
+                        // skipped and the pile lost its icons).
+                        if (NotifBubble.this.isPinned(topItem)) {
+                            NotifBubble.this.unpinForDock(topItem);
+                        }
                         NotifBubble.this.dockFromMini();
                     }
                 } catch (Throwable th) {
@@ -2572,7 +2702,7 @@ public class NotifBubble implements BubbleFeature {
         try {
             icon.animate().cancel();
             icon.setTranslationY(this.host.dp(16));
-            icon.animate().translationY(0.0f).setDuration(ENTER_ANIM_MS).setListener(null).start();
+            icon.animate().withLayer().translationY(0.0f).setDuration(ENTER_ANIM_MS).setListener(null).start();
         } catch (Throwable th) {
             this.host.log("animateDockIn failed", th);
         }
@@ -2761,7 +2891,7 @@ public class NotifBubble implements BubbleFeature {
                         if (this.dragging && z && z2) {
                             this.lastSwipeEndTime = SystemClock.uptimeMillis();
                             final int i = physicalRight ? 1 : -1;
-                            this.target.animate().translationX(this.target.getWidth() * i * 1.5f).alpha(0.0f).setDuration(200L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.SwipeListener.1
+                            this.target.animate().withLayer().translationX(this.target.getWidth() * i * 1.5f).alpha(0.0f).setDuration(200L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.SwipeListener.1
                                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                                 public void onAnimationEnd(Animator animator) {
                                     SwipeListener.this.target.setTranslationX(0.0f);
@@ -2776,7 +2906,7 @@ public class NotifBubble implements BubbleFeature {
                                 }
                             }).start();
                         } else if (this.dragging) {
-                            this.target.animate().translationX(0.0f).alpha(1.0f).setDuration(NotifBubble.ENTER_ANIM_MS).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.SwipeListener.2
+                            this.target.animate().withLayer().translationX(0.0f).alpha(1.0f).setDuration(NotifBubble.ENTER_ANIM_MS).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.SwipeListener.2
                                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                                 public void onAnimationEnd(Animator animator) {
                                     SwipeListener.this.callback.onDragProgress(0.0f);
@@ -2812,7 +2942,7 @@ public class NotifBubble implements BubbleFeature {
                             this.velocityTracker = null;
                         }
                         if (this.dragging) {
-                            this.target.animate().translationX(0.0f).alpha(1.0f).setDuration(NotifBubble.ENTER_ANIM_MS).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.SwipeListener.3
+                            this.target.animate().withLayer().translationX(0.0f).alpha(1.0f).setDuration(NotifBubble.ENTER_ANIM_MS).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.NotifBubble.SwipeListener.3
                                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                                 public void onAnimationEnd(Animator animator) {
                                     SwipeListener.this.callback.onDragProgress(0.0f);
@@ -2871,7 +3001,7 @@ public class NotifBubble implements BubbleFeature {
                         if (view.getWidth() > 0 && view.getHeight() > 0) {
                             view.setPivotX((float) view.getWidth());
                             view.setPivotY((float) view.getHeight());
-                            view.animate().alpha(1.0f).scaleX(1.0f).scaleY(1.0f).setDuration(ENTER_ANIM_MS).start();
+                            view.animate().withLayer().alpha(1.0f).scaleX(1.0f).scaleY(1.0f).setDuration(ENTER_ANIM_MS).start();
                         } else {
                             // fixed62: still unmeasured after 5 frames —
                             // the default pivot is the top-left corner, so

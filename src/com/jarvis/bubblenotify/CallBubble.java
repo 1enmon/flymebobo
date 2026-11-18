@@ -555,7 +555,7 @@ public class CallBubble implements BubbleFeature {
                 // into the pile.
                 view.animate().cancel();
                 view.setTranslationY(dp(16));
-                view.animate().translationY(0.0f).setDuration(200L).start();
+                view.animate().withLayer().translationY(0.0f).setDuration(200L).start();
             } else {
                 animateIn(view);
             }
@@ -713,7 +713,7 @@ public class CallBubble implements BubbleFeature {
                         }
                         view.setPivotX((float) view.getWidth());
                         view.setPivotY((float) view.getHeight());
-                        view.animate().alpha(1.0f).scaleX(1.0f).scaleY(1.0f).setDuration(200L).start();
+                        view.animate().withLayer().alpha(1.0f).scaleX(1.0f).scaleY(1.0f).setDuration(200L).start();
                     } catch (Throwable th) {
                         log("Call animateIn failed", th);
                     }
@@ -1588,7 +1588,7 @@ public class CallBubble implements BubbleFeature {
                         }
                         float f2 = 84.0f * f;
                         if (this.dragging && x < 0.0f && ((-x) > f2 || xVelocity < -1000.0f)) {
-                            view.animate().translationX(-view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.CallBubble.SwipeTapListener.1
+                            view.animate().withLayer().translationX(-view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.CallBubble.SwipeTapListener.1
                                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                                 public void onAnimationEnd(Animator animator) {
                                     view.setTranslationX(0.0f);
@@ -1601,7 +1601,7 @@ public class CallBubble implements BubbleFeature {
                                 }
                             }).start();
                         } else if (this.dragging && x > 0.0f && (x > f2 || xVelocity > 1000.0f)) {
-                            view.animate().translationX(view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.CallBubble.SwipeTapListener.2
+                            view.animate().withLayer().translationX(view.getWidth()).alpha(0.0f).setDuration(180L).setListener(new AnimatorListenerAdapter() { // from class: com.jarvis.bubblenotify.CallBubble.SwipeTapListener.2
                                 @Override // android.animation.AnimatorListenerAdapter, android.animation.Animator.AnimatorListener
                                 public void onAnimationEnd(Animator animator) {
                                     view.setTranslationX(0.0f);
@@ -1614,7 +1614,7 @@ public class CallBubble implements BubbleFeature {
                                 }
                             }).start();
                         } else if (this.dragging) {
-                            view.animate().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
+                            view.animate().withLayer().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
                         } else if (jUptimeMillis < 500 && Math.abs(x) < f * 10.0f) {
                             this.callback.onTap();
                         }
@@ -1646,7 +1646,7 @@ public class CallBubble implements BubbleFeature {
                             this.callback.onDragEnd();
                         }
                         if (this.dragging) {
-                            view.animate().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
+                            view.animate().withLayer().translationX(0.0f).alpha(1.0f).setDuration(180L).start();
                         }
                         return true;
                     default:

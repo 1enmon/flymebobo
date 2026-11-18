@@ -1,6 +1,6 @@
 id=com.jarvis.bubblenotify
 name=煤气泡
-version=1.0.3
+version=1.0.5
 author=Jarvis
 description=煤气泡: 右下角气泡显示通知, 三级胶囊逐级切换; 音乐播放器与旋转唱片; 来电接管; 本地识别验证码/取件码。
 minApiVersion=102

@@ -118,6 +118,9 @@ public final class Settings {
     public static final String ITEM_INTENT = "item_intent";
     public static final String ITEM_KEY = "item_key";
     public static final String ITEM_PACKAGE = "item_package";
+    public static final String ITEM_PROGRESS = "item_progress";
+    public static final String ITEM_PROGRESS_INDETERMINATE = "item_progress_indeterminate";
+    public static final String ITEM_PROGRESS_MAX = "item_progress_max";
     public static final String ITEM_REPLY_INTENT = "item_reply_intent";
     public static final String ITEM_REPLY_KEY = "item_reply_key";
     public static final String ITEM_TEXT = "item_text";

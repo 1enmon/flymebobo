@@ -151,6 +151,18 @@ public final class NotifCollectionHook {
         b.putString(Settings.ITEM_TEXT, text);
         b.putString(Settings.ITEM_PACKAGE, pkg);
         b.putLong(Settings.ITEM_TIME, sbn.getPostTime());
+        // fixed133: carry progress through the fallback too, so a missed
+        // progress notification still shows its bar when it is rescued.
+        if (extras != null) {
+            int hookProgress = extras.getInt("android.progress", 0);
+            int hookProgressMax = extras.getInt("android.progressMax", 0);
+            boolean hookProgressIndeterminate = extras.getBoolean("android.progressIndeterminate", false);
+            if (hookProgressMax > 0 || hookProgressIndeterminate) {
+                b.putInt(Settings.ITEM_PROGRESS, hookProgress);
+                b.putInt(Settings.ITEM_PROGRESS_MAX, hookProgressMax);
+                b.putBoolean(Settings.ITEM_PROGRESS_INDETERMINATE, hookProgressIndeterminate);
+            }
+        }
         b.putParcelable(Settings.ITEM_INTENT, n.contentIntent);
         Bitmap icon = drawAppIcon(pkg);
         if (icon != null) {
