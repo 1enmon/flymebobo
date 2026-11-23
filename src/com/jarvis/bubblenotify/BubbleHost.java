@@ -78,6 +78,8 @@ public interface BubbleHost {
 
     boolean isScreenOn();
 
+    boolean isSceneSuppressed();
+
     void log(String str);
 
     void log(String str, Throwable th);

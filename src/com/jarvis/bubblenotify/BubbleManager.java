@@ -96,6 +96,10 @@ public class BubbleManager implements BubbleHost {
     private boolean swiping = false;
     private boolean cardOpen = false;
     private boolean screenOn = true;
+    // Scene guard: landscape game/video scene hides bubbles.
+    // See ImmersiveSceneGuard.
+    private ImmersiveSceneGuard sceneGuard;
+    private boolean sceneSuppressed;
     private boolean replyFocusable = false;
     private boolean enabled = true;
     private boolean musicEnabled = true;
@@ -511,6 +515,33 @@ public class BubbleManager implements BubbleHost {
             this.wm.addView(this.root, this.params);
             this.windowAdded = true;
             installTouchableRegionListener();
+            // Scene guard init: entering a landscape game/video
+            // scene hides the whole bubble root (same trick as the
+            // screen-off hide in onScreenPowerChanged); leaving it
+            // restores the root (unless the screen is off) and
+            // flushes the notifications NotifBubble queued.
+            try {
+                this.sceneGuard = new ImmersiveSceneGuard(this.app, this.handler);
+                this.sceneGuard.setListener(new ImmersiveSceneGuard.Listener() {
+                    @Override
+                    public void onSceneChanged(boolean immersive) {
+                        BubbleManager.this.sceneSuppressed = immersive;
+                        try {
+                            if (BubbleManager.this.root != null) {
+                                BubbleManager.this.root.setVisibility(
+                                        immersive || !BubbleManager.this.screenOn
+                                                ? View.GONE : View.VISIBLE);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        if (!immersive && BubbleManager.this.notifBubble != null) {
+                            BubbleManager.this.notifBubble.flushSuppressedQueue();
+                        }
+                    }
+                });
+                this.sceneGuard.start();
+            } catch (Throwable ignored) {
+            }
             log("Bubble window added. screen=" + this.screenWidthPx + "x" + this.screenHeightPx);
         } catch (Throwable th) {
             log("Failed to add bubble window", th);
@@ -1239,7 +1270,7 @@ public class BubbleManager implements BubbleHost {
         // hidden root and appear when the screen turns on.
         try {
             if (this.root != null) {
-                this.root.setVisibility(z ? View.VISIBLE : View.GONE);
+                this.root.setVisibility(z && !this.sceneSuppressed ? View.VISIBLE : View.GONE);
             }
         } catch (Throwable th) {
             log("hide bubble root on screen off failed", th);
@@ -1305,6 +1336,11 @@ public class BubbleManager implements BubbleHost {
     @Override // com.jarvis.bubblenotify.BubbleHost
     public boolean isScreenOn() {
         return this.screenOn;
+    }
+
+    @Override // com.jarvis.bubblenotify.BubbleHost
+    public boolean isSceneSuppressed() {
+        return this.sceneSuppressed;
     }
 
     @Override // com.jarvis.bubblenotify.BubbleHost
