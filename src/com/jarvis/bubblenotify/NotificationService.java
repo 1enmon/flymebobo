@@ -365,10 +365,29 @@ public class NotificationService extends NotificationListenerService {
             return false;
         }
         try {
-            return getPackageManager().getApplicationInfo(pkg, 0) != null;
+            if (getPackageManager().getApplicationInfo(pkg, 0) != null) {
+                return true;
+            }
         } catch (Throwable ignored) {
-            return false;
         }
+        // v204: package-visibility fallback. After a reinstall
+        // (new signature), Flyme's "read app list" privacy grant
+        // resets and getApplicationInfo throws NameNotFound for
+        // every third-party app — which made the push-service
+        // delegation above drop ALL delegated notifications.
+        // LauncherApps is the launcher-facing API and is not
+        // subject to that filter.
+        try {
+            android.content.pm.LauncherApps launcherApps = (android.content.pm.LauncherApps) getSystemService("launcherapps");
+            if (launcherApps != null) {
+                java.util.List<android.content.pm.LauncherActivityInfo> list = launcherApps.getActivityList(pkg, android.os.Process.myUserHandle());
+                if (list != null && !list.isEmpty()) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     private boolean isVideoApp(String str) {
@@ -649,50 +668,35 @@ public class NotificationService extends NotificationListenerService {
         Code decompiled incorrectly, please refer to instructions dump.
         To view partially-correct add '--show-bad-code' argument
     */
-    private void noteNotifGroup(android.app.Notification r6, java.lang.String r7) {
-        /*
-            r5 = this;
-            int r0 = r6.flags     // Catch: java.lang.Throwable -> L49
-            r0 = r0 & 512(0x200, float:7.17E-43)
-            if (r0 == 0) goto L7
-            return
-        L7:
-            java.lang.String r6 = r6.getGroup()     // Catch: java.lang.Throwable -> L49
-            if (r6 != 0) goto Le
-            return
-        Le:
-            long r0 = android.os.SystemClock.uptimeMillis()     // Catch: java.lang.Throwable -> L49
-            java.util.Map<java.lang.String, java.lang.Long> r2 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L49
-            monitor-enter(r2)     // Catch: java.lang.Throwable -> L49
-            java.util.Map<java.lang.String, java.lang.Long> r3 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L46
-            java.lang.StringBuilder r4 = new java.lang.StringBuilder     // Catch: java.lang.Throwable -> L46
-            r4.<init>()     // Catch: java.lang.Throwable -> L46
-            java.lang.StringBuilder r7 = r4.append(r7)     // Catch: java.lang.Throwable -> L46
-            java.lang.String r4 = "\u0001"
-            java.lang.StringBuilder r7 = r7.append(r4)     // Catch: java.lang.Throwable -> L46
-            java.lang.StringBuilder r6 = r7.append(r6)     // Catch: java.lang.Throwable -> L46
-            java.lang.String r6 = r6.toString()     // Catch: java.lang.Throwable -> L46
-            java.lang.Long r7 = java.lang.Long.valueOf(r0)     // Catch: java.lang.Throwable -> L46
-            r3.put(r6, r7)     // Catch: java.lang.Throwable -> L46
-            java.util.Map<java.lang.String, java.lang.Long> r6 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L46
-            int r6 = r6.size()     // Catch: java.lang.Throwable -> L46
-            r7 = 64
-            if (r6 <= r7) goto L44
-            java.util.Map<java.lang.String, java.lang.Long> r6 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L46
-            r6.clear()     // Catch: java.lang.Throwable -> L46
-        L44:
-            monitor-exit(r2)     // Catch: java.lang.Throwable -> L46
-            goto L4a
-        L46:
-            r6 = move-exception
-            monitor-exit(r2)     // Catch: java.lang.Throwable -> L46
-            throw r6     // Catch: java.lang.Throwable -> L49
-        L49:
-            r6 = move-exception
-        L4a:
-            return
-        */
-        throw new UnsupportedOperationException("Method not decompiled: com.jarvis.bubblenotify.NotificationService.noteNotifGroup(android.app.Notification, java.lang.String):void");
+    // v207 fix: this method was a jadx stub in the repo source
+    // ("Method not decompiled") that threw
+    // UnsupportedOperationException on EVERY call — killing
+    // onNotificationPosted for every normal notification since
+    // the source was decompiled (the listener path silently
+    // died; only the hook fallback kept some bubbles alive).
+    // Reconstructed faithfully from the decompiler's own
+    // register dump left in the stub's comment: record a child
+    // notification's group so a later group summary for the
+    // same pkg+group counts as redundant
+    // (isRedundantGroupSummary reads the same map).
+    private void noteNotifGroup(Notification notification, String str) {
+        try {
+            if ((notification.flags & 512) != 0) {
+                return;
+            }
+            String group = notification.getGroup();
+            if (group == null) {
+                return;
+            }
+            long now = SystemClock.uptimeMillis();
+            synchronized (this.recentNotifGroups) {
+                this.recentNotifGroups.put(str + "\u0001" + group, Long.valueOf(now));
+                if (this.recentNotifGroups.size() > 64) {
+                    this.recentNotifGroups.clear();
+                }
+            }
+        } catch (Throwable ignored) {
+        }
     }
 
     /* JADX WARN: Code duplicated, block: B:137:0x021a A[Catch: all -> 0x026c, TryCatch #1 {, blocks: (B:85:0x0161, B:87:0x016b, B:89:0x0171, B:93:0x0177, B:95:0x0189, B:97:0x0199, B:100:0x01a2, B:101:0x01a7, B:103:0x01ad, B:109:0x01c2, B:113:0x01c8, B:114:0x01ca, B:127:0x0209, B:133:0x020f, B:134:0x0210, B:135:0x0214, B:137:0x021a, B:139:0x022d, B:142:0x023f, B:143:0x0241, B:153:0x0269, B:154:0x026a, B:99:0x01a0, B:144:0x0242, B:146:0x024f, B:148:0x025f, B:149:0x0265, B:115:0x01cb, B:117:0x01d5, B:119:0x01db, B:120:0x01df, B:122:0x01e5, B:124:0x01f8, B:126:0x0208, B:129:0x020b), top: B:164:0x0161, outer: #3, inners: #0, #2 }] */
@@ -901,9 +905,50 @@ public class NotificationService extends NotificationListenerService {
         releaseMediaController();
     }
 
+    // v203: periodic update check (ported from 2.0). First run
+    // 60s after the listener connects, then every 6 hours. A
+    // newer GitHub release posts one system notification (once
+    // per versionCode) — never a silent install.
+    private boolean updateCheckStarted = false;
+    private final android.os.Handler updateCheckHandler = new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable updateCheckRunnable = new Runnable() {
+        @Override // java.lang.Runnable
+        public void run() {
+            try {
+                UpdateChecker.checkAsync(NotificationService.this, new UpdateChecker.Callback() {
+                    @Override // com.jarvis.bubblenotify.UpdateChecker.Callback
+                    public void onResult(UpdateChecker.UpdateInfo info) {
+                        if (info != null && info.available) {
+                            UpdateChecker.notifyUpdate(NotificationService.this, info);
+                        }
+                    }
+                });
+            } catch (Throwable ignored) {
+            }
+            try {
+                NotificationService.this.updateCheckHandler.postDelayed(NotificationService.this.updateCheckRunnable, 21600000L);
+            } catch (Throwable ignored2) {
+            }
+        }
+    };
+
+    private void startUpdateCheck() {
+        if (this.updateCheckStarted) {
+            return;
+        }
+        this.updateCheckStarted = true;
+        try {
+            this.updateCheckHandler.postDelayed(this.updateCheckRunnable, 60000L);
+        } catch (Throwable ignored) {
+        }
+    }
+
     @Override // android.service.notification.NotificationListenerService
     public void onListenerConnected() {
         Log.i(Settings.TAG, "Notification listener connected.");
+        // v205 diag: prove liveness in the SystemUI log (the
+        // svc log file may be unwritable under scoped storage).
+        startUpdateCheck();
         try {
             StatusBarNotification[] activeNotifications = getActiveNotifications();
             if (activeNotifications != null) {

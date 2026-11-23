@@ -138,11 +138,13 @@ public final class NotifCollectionHook {
                 log("Push service delegated (hook): pkg=" + packageName + " realPkg=" + realPkg);
                 packageName = realPkg;
             } else {
+                log("collect drop: push-delegate pkg=" + packageName + " realPkg=" + realPkg);
                 return null;
             }
         }
         Bundle bundle = notification.extras;
         if ((bundle != null && bundle.getParcelable("android.mediaSession") != null) || "call".equals(notification.category) || (notification.flags & 512) != 0) {
+            log("collect drop: media/call/summary pkg=" + packageName + " flags=" + notification.flags + " cat=" + notification.category);
             return null;
         }
         String text = readText(bundle, "android.title");
@@ -151,6 +153,7 @@ public final class NotifCollectionHook {
             text2 = readText(bundle, "android.bigText");
         }
         if ((text == null || text.isEmpty()) && (text2 == null || text2.isEmpty())) {
+            log("collect drop: empty title+text pkg=" + packageName);
             return null;
         }
         Bundle bundle2 = new Bundle();
@@ -295,10 +298,24 @@ public final class NotifCollectionHook {
             return false;
         }
         try {
-            return this.app.getPackageManager().getApplicationInfo(pkg, 0) != null;
+            if (this.app.getPackageManager().getApplicationInfo(pkg, 0) != null) {
+                return true;
+            }
         } catch (Throwable ignored) {
-            return false;
         }
+        // v204: same LauncherApps fallback as the listener's
+        // isInstalledApp (package-visibility hardening).
+        try {
+            android.content.pm.LauncherApps launcherApps = (android.content.pm.LauncherApps) this.app.getSystemService("launcherapps");
+            if (launcherApps != null) {
+                java.util.List<android.content.pm.LauncherActivityInfo> list = launcherApps.getActivityList(pkg, android.os.Process.myUserHandle());
+                if (list != null && !list.isEmpty()) {
+                    return true;
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
     }
 
     // fixed176: IStatusBarService.onNotificationClear, the flymebobo

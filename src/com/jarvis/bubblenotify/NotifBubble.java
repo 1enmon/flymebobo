@@ -323,6 +323,12 @@ public class NotifBubble implements BubbleFeature {
             if (arrayList != null) {
                 for (Bundle bundle : arrayList) {
                     if (bundle != null) {
+                        // v203: per-app NEVER rule — filtered out
+                        // of the sync, so it never reaches items.
+                        if (this.host != null && this.host.appRuleFor(bundle.getString(Settings.ITEM_PACKAGE)) == AppRules.NEVER) {
+                            FileLog.i("rule drop (list): pkg=" + bundle.getString(Settings.ITEM_PACKAGE));
+                            continue;
+                        }
                         NotifItem notifItem3 = new NotifItem();
                         notifItem3.key = bundle.getString(Settings.ITEM_KEY);
                         notifItem3.title = bundle.getString(Settings.ITEM_TITLE);
@@ -427,11 +433,43 @@ public class NotifBubble implements BubbleFeature {
                 } else {
                     onNewNotification();
                 }
+                applyEdgeDocking();
                 return;
             }
             refreshCurrentLevel();
         } catch (Throwable th4) {
             this.host.log("NotifBubble.onNotifyList failed", th4);
+        }
+        applyEdgeDocking();
+    }
+
+    /** v203: per-app EDGE rule — items of an EDGE app skip the
+     * pop and go straight into the docked edge pile, using the
+     * same trio dockFromMini() uses (mark pkg docked-hidden,
+     * rebuild the pile, refresh the mini row). Pinned items
+     * (downloads / codes) are never docked, same as manual dock. */
+    private void applyEdgeDocking() {
+        try {
+            if (this.host == null || this.items.isEmpty()) {
+                return;
+            }
+            boolean changed = false;
+            for (NotifItem it : this.items) {
+                if (it != null && it.pkg != null
+                        && this.host.appRuleFor(it.pkg) == AppRules.EDGE
+                        && !isPinned(it)
+                        && !this.dockedHiddenPkgs.contains(it.pkg)) {
+                    this.dockedHiddenPkgs.add(it.pkg);
+                    changed = true;
+                }
+            }
+            if (changed) {
+                rebuildDocked(false);
+                applyDockedHidden();
+                refreshMini();
+            }
+        } catch (Throwable th) {
+            this.host.log("applyEdgeDocking failed", th);
         }
     }
 
@@ -497,6 +535,12 @@ public class NotifBubble implements BubbleFeature {
                     this.suppressedQueue.remove(0);
                 }
             }
+            return;
+        }
+        // v203: per-app NEVER rule — this app's notifications
+        // never become bubbles (system notification untouched).
+        if (this.host != null && this.host.appRuleFor(bundle.getString(Settings.ITEM_PACKAGE)) == AppRules.NEVER) {
+            FileLog.i("rule drop (single): pkg=" + bundle.getString(Settings.ITEM_PACKAGE));
             return;
         }
         try {
@@ -662,6 +706,7 @@ public class NotifBubble implements BubbleFeature {
         } catch (Throwable th5) {
             this.host.log("NotifBubble.onNotifySingle failed", th5);
         }
+        applyEdgeDocking();
     }
 
     public void onTestNotify(String str, String str2, String str3, Bitmap bitmap, PendingIntent pendingIntent) {

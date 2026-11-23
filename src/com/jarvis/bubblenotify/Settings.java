@@ -8,7 +8,7 @@ public final class Settings {
     // fixed214: module versionCode, written into every FileLog line
     // so a log file always says which build produced it. Bump this
     // together with apktool.yml versionCode on every build.
-    public static final int VERSION_CODE = 201;
+    public static final int VERSION_CODE = 211;
     public static final String ACTION_CALL = "com.jarvis.bubblenotify.CALL";
     // fixed215: listener log forwarding (fixed200). The listener
     // cannot write /sdcard/ (scoped storage), so it broadcasts

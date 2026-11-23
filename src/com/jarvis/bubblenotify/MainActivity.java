@@ -255,6 +255,19 @@ public class MainActivity extends Activity {
             }
         });
         addSpacer(linearLayoutMakeCollapsibleCard4, 10);
+        // v203: 应用规则 + 检查更新入口卡（功能储备 #5 + 在线更新，
+        // 从 2.0 移植；界面已按预览确认）。
+        LinearLayout linearLayoutMakeCardRules = makeCard(linearLayout);
+        // v211: 应用规则入口暂时下架（功能同步问题未解，
+        // wei 决定先去掉；代码保留，入口隐藏）。
+        linearLayoutMakeCardRules.addView(buildLinkRow("检查更新", "当前 v" + appVersionName() + " · 点一下检查 GitHub 最新版", new View.OnClickListener() {
+            @Override // android.view.View.OnClickListener
+            public void onClick(View view) {
+                MainActivity.this.checkForUpdate(true);
+            }
+        }));
+        // 打开时自动查一次更新（有新版才提示，平时不打扰）。
+        checkForUpdate(false);
         TextView textView5 = new TextView(this);
         textView5.setTextSize(12.0f);
         textView5.setTextColor(COLOR_FOOTER);
@@ -400,6 +413,66 @@ public class MainActivity extends Activity {
     /* JADX INFO: Access modifiers changed from: private */
     public int dp(int i) {
         return Math.round(i * getResources().getDisplayMetrics().density);
+    }
+
+    /** v203: 设置页链接行（标题 + 副标题 + 箭头），点整行触发。 */
+    private LinearLayout buildLinkRow(String title, String sub, View.OnClickListener click) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(0);
+        row.setGravity(16);
+        row.setPadding(dp(16), dp(14), dp(16), dp(14));
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(1);
+        TextView t = new TextView(this);
+        t.setText(title);
+        t.setTextSize(16.0f);
+        t.setTypeface(Typeface.DEFAULT_BOLD);
+        t.setTextColor(COLOR_TITLE);
+        texts.addView(t);
+        TextView s = new TextView(this);
+        s.setText(sub);
+        s.setTextSize(12.0f);
+        s.setTextColor(COLOR_SUBTITLE);
+        s.setPadding(0, dp(2), 0, 0);
+        texts.addView(s);
+        row.addView(texts, new LinearLayout.LayoutParams(0, -2, 1.0f));
+        TextView chev = new TextView(this);
+        chev.setText("›");
+        chev.setTextSize(20.0f);
+        chev.setTextColor(COLOR_FOOTER);
+        row.addView(chev);
+        row.setOnClickListener(click);
+        return row;
+    }
+
+    /** v203: 在线更新（搬 2.0 的 UpdateChecker）。manual=true 时
+     * 无论结果都 Toast；自动检查只在有新版时弹窗 + 发通知，
+     * 绝不静默安装。 */
+    private void checkForUpdate(final boolean manual) {
+        if (manual) {
+            Toast.makeText(this, "正在检查更新…", 0).show();
+        }
+        UpdateChecker.checkAsync(this, new UpdateChecker.Callback() {
+            @Override // com.jarvis.bubblenotify.UpdateChecker.Callback
+            public void onResult(UpdateChecker.UpdateInfo info) {
+                if (info == null) {
+                    if (manual) {
+                        Toast.makeText(MainActivity.this, "检查失败，请稍后再试", 0).show();
+                    }
+                    return;
+                }
+                if (info.available) {
+                    UpdateChecker.notifyUpdate(MainActivity.this, info);
+                    UpdateChecker.showUpdateDialog(MainActivity.this, info);
+                } else if (manual) {
+                    if (info.error != null) {
+                        Toast.makeText(MainActivity.this, "检查失败，请稍后再试", 0).show();
+                    } else {
+                        Toast.makeText(MainActivity.this, "已是最新版本", 0).show();
+                    }
+                }
+            }
+        });
     }
 
     private LinearLayout makeCard(LinearLayout linearLayout) {

@@ -102,6 +102,8 @@ public class BubbleManager implements BubbleHost {
     private boolean sceneSuppressed;
     private boolean replyFocusable = false;
     private boolean enabled = true;
+    // v203: per-app bubble rules (AppRules), pkg -> mode.
+    private final java.util.HashMap<String, Integer> appRules = new java.util.HashMap<>();
     private boolean musicEnabled = true;
     private boolean callEnabled = true;
     private int cardBottomOffsetDp = 32;
@@ -381,6 +383,8 @@ public class BubbleManager implements BubbleHost {
             this.musicCardHeight = remotePreferences.getInt(Settings.KEY_MUSIC_CARD_HEIGHT_DP, 0);
             this.musicCardOpacity = remotePreferences.getInt(Settings.KEY_MUSIC_CARD_OPACITY, 75);
             this.musicCardCorner = remotePreferences.getInt(Settings.KEY_MUSIC_CARD_CORNER_DP, 20);
+            this.appRules.clear();
+            this.appRules.putAll(AppRules.parseRules(remotePreferences));
             log("Settings loaded from remote prefs.");
         } catch (Throwable th) {
             log("Remote prefs unavailable, using defaults: " + String.valueOf(th));
@@ -410,6 +414,24 @@ public class BubbleManager implements BubbleHost {
     }
 
     public void applySettingsFromIntent(Intent intent) {
+        // v210: per-app rules ride this intent as a flattened
+        // extra (AppRules.EXTRA_RULES) — v209 diagnostics proved
+        // remote preferences do not refresh live in this process
+        // (every live reload read {}), while intent extras are
+        // how every other setting here arrives. Remote prefs
+        // remain the fallback when no extra is present.
+        try {
+            String flat = intent.getStringExtra(AppRules.EXTRA_RULES);
+            if (flat != null) {
+                this.appRules.clear();
+                this.appRules.putAll(AppRules.parseFlat(flat));
+            } else {
+                SharedPreferences rp = this.xposed.getRemotePreferences(Settings.PREFS_NAME);
+                this.appRules.clear();
+                this.appRules.putAll(AppRules.parseRules(rp));
+            }
+        } catch (Throwable ignored) {
+        }
         if (intent.hasExtra(Settings.KEY_ENABLED)) {
             this.enabled = intent.getBooleanExtra(Settings.KEY_ENABLED, this.enabled);
             this.musicEnabled = intent.getBooleanExtra(Settings.KEY_MUSIC_ENABLED, this.musicEnabled);
@@ -1341,6 +1363,18 @@ public class BubbleManager implements BubbleHost {
     @Override // com.jarvis.bubblenotify.BubbleHost
     public boolean isSceneSuppressed() {
         return this.sceneSuppressed;
+    }
+
+    @Override // com.jarvis.bubblenotify.BubbleHost
+    public int appRuleFor(String str) {
+        // v211: feature shelved at wei's request — gates
+        // stay in the code but always see DEFAULT until the
+        // sync problem is solved and the entry returns.
+        if (true) {
+            return AppRules.DEFAULT;
+        }
+        Integer v = str == null ? null : this.appRules.get(str);
+        return v == null ? AppRules.DEFAULT : v.intValue();
     }
 
     @Override // com.jarvis.bubblenotify.BubbleHost

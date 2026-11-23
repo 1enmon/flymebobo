@@ -18,6 +18,8 @@ public interface BubbleHost {
 
     void applyCardBottomOffset();
 
+    int appRuleFor(String str);
+
     int borderColor();
 
     int bubbleOpacity();
