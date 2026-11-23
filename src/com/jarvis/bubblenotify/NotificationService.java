@@ -7,22 +7,40 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.SharedPreferences;
+import android.content.pm.ApplicationInfo;
+import android.content.pm.LauncherActivityInfo;
+import android.content.pm.LauncherApps;
+import android.content.res.Resources;
 import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Canvas;
+import android.graphics.drawable.AdaptiveIconDrawable;
+import android.graphics.drawable.BitmapDrawable;
 import android.graphics.drawable.Drawable;
+import android.graphics.drawable.Icon;
 import android.media.MediaMetadata;
+import android.media.Rating;
 import android.media.session.MediaController;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.Parcelable;
+import android.os.Process;
 import android.os.SystemClock;
 import android.service.notification.NotificationListenerService;
 import android.service.notification.StatusBarNotification;
 import android.util.Log;
+import android.widget.RemoteViews;
+import java.lang.reflect.Field;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -31,745 +49,237 @@ import java.util.regex.Pattern;
 
 /* JADX INFO: loaded from: classes.dex */
 public class NotificationService extends NotificationListenerService {
-    private static final Pattern DIST_PATTERN = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(公里|千米|米|km|m)");
-    private static final Pattern REMAIN_DIST_PATTERN = Pattern.compile("(?:剩余|还剩)\\s*(\\d+(?:\\.\\d+)?\\s*(?:公里|千米|米|km|m))");
-    private static final Pattern REMAIN_TIME_PATTERN = Pattern.compile("(?:约|预计)\\s*(\\d+\\s*分钟)");
-
-    // fixed36: vendor push services post notifications on behalf of apps
-    // (e.g. Meituan's "商品已送达" arrives as "推送服务" instead of
-    // "美团"). The user wants only the app's own notifications — drop
-    // anything posted by a push service. Belt and suspenders: match the
-    // package name against the known vendor push services, and also match
-    // the app label "推送服务" (the exact case on this phone) so a
-    // package we did not list is still caught.
-    private static final java.util.Set<String> PUSH_SERVICE_PACKAGES = new java.util.HashSet<String>(java.util.Arrays.asList(
-            "com.meizu.cloud.pushservice", "com.meizu.push", "com.meizu.flyme.push", "com.meizu.cloud.pushsdk",
-            "com.xiaomi.xmsf",
-            "com.huawei.android.pushagent", "com.huawei.hms",
-            "com.coloros.mcs", "com.heytap.mcs", "com.heytap.msp",
-            "com.vivo.pushservice", "com.vivo.push",
-            "com.samsung.android.push"));
-
-    private boolean isPushService(String pkg) {
-        if (pkg == null) {
-            return false;
-        }
-        if (PUSH_SERVICE_PACKAGES.contains(pkg)) {
-            return true;
-        }
-        try {
-            CharSequence label = getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(pkg, 0));
-            if (label != null && "推送服务".equals(label.toString())) {
-                return true;
-            }
-        } catch (Throwable ignored) {
-        }
-        return false;
-    }
+    private static final long MUSIC_INACTIVE_DELAY_MS = 2000;
     private static final long NOTIF_DEDUP_WINDOW_MS = 15000;
     private static final long NOTIF_GROUP_WINDOW_MS = 10000;
+    private static final long NOTIF_KEY_TTL_MS = 3600000;
     private static final long NOTIF_SUMMARY_WINDOW_MS = 60000;
     private String callKey;
+    private Boolean currentFavorite;
     private String currentLyricBigText;
     private String currentLyricText;
     private String currentLyricTicker;
     private String currentMediaKey;
     private String currentMediaTitle;
-    // fixed19: duration of the current song, for the sticky-title check.
-    private long currentMediaDuration = -1;
-    // fixed18: the notification's android.title is the stable song title.
-    // NetEase writes the current lyric line into the MediaSession TITLE,
-    // so the metadata title cannot be trusted as the song title.
     private String currentNotifTitle;
-    // fixed31: network lyrics (fixed18 LRCLIB) are OFF — lyrics are back
-    // to the original notification source (updateLyricCandidates, see
-    // sendMusicStateFromController). The LRCLIB lookup returned nothing
-    // for songs the library does not carry, so the card showed no lyric
-    // at all. NetworkLyrics.java stays in the tree, unused, in case the
-    // network source is wanted again later.
-    // fixed31: delayed "music inactive". When a music app cancels and
-    // re-posts its notification (every lyric line for some apps), the
-    // removal used to broadcast inactive immediately, the bubble hid
-    // 2.5s later, and the re-post popped it again — the player popping
-    // twice. Now the inactive broadcast waits 2s and is cancelled if a
-    // replacement media notification attaches first.
-    private static final long MUSIC_INACTIVE_DELAY_MS = 2000;
-    private final android.os.Handler mainHandler = new android.os.Handler(android.os.Looper.getMainLooper());
-    private Runnable pendingMusicInactiveRunnable;
+    private String lastArtistMeta;
+    private String lastNotifTitle;
+    private String lastRawTitle;
+    private String lastSubtitle;
     private MediaController.Callback mediaCallback;
     private MediaController mediaController;
+    private Runnable pendingMusicInactiveRunnable;
+    private String swappedArtist;
+    private boolean swappedLayout;
+    private String swappedSongTitle;
+    private static final Pattern DIST_PATTERN = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(公里|千米|米|km|m)");
+    private static final Pattern REMAIN_DIST_PATTERN = Pattern.compile("(?:剩余|还剩)\\s*(\\d+(?:\\.\\d+)?\\s*(?:公里|千米|米|km|m))");
+    private static final Pattern REMAIN_TIME_PATTERN = Pattern.compile("(?:约|预计)\\s*(\\d+\\s*分钟)");
+    private static final Set<String> PUSH_SERVICE_PACKAGES = new HashSet(Arrays.asList("com.meizu.cloud.pushservice", "com.meizu.push", "com.meizu.flyme.push", "com.meizu.cloud.pushsdk", "com.xiaomi.xmsf", "com.huawei.android.pushagent", "com.huawei.hms", "com.coloros.mcs", "com.heytap.mcs", "com.heytap.msp", "com.vivo.pushservice", "com.vivo.push", "com.samsung.android.push"));
+    private static final Set<String> VIDEO_PACKAGES = new HashSet(Arrays.asList("tv.danmaku.bili", "com.ss.android.ugc.aweme", "com.ss.android.ugc.aweme.lite", "com.ss.android.ugc.live", "com.kuaishou.nebula", "com.kuaishou.nebula.lite", "com.tencent.qqlive", "com.iqiyi.qyplayer", "com.youku.phone", "com.hunantv.imgo.activity", "com.ss.android.article.video", "com.baidu.video", "com.sohu.sohuvideo", "com.tencent.weishi", "com.miui.video", "com.meizu.media.video"));
+    private long currentMediaDuration = -1;
+    // fixed181: network lyrics (LRCLIB, 2.0 v88). The 1.x
+    // NetworkLyrics class existed but was dead code — never called
+    // from anywhere. Wire it up: fetch once per song on a
+    // background thread when the notification/MediaSession carry
+    // no lyric (QQ Original / Qishui have none), then pick the
+    // line by playback position. Same public API as 2.0's
+    // fetchNetworkLyrics (lrclib.net /api/get, /api/search
+    // fallback), 5.5s timeout.
+    private java.util.List<NetworkLyrics.Line> netLyricLines;
+    private String netLyricSong;
+    private String netLyricArtist;
+    private boolean netLyricFetching;
+    private String netLyricFetchingFor;
+    private String netLyricLastLine;
+    private String netLyricTickPackage;
+    private PendingIntent netLyricTickIntent;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final List<RecentNotif> recentNotifs = new ArrayList();
     private final Set<String> selfCancelledKeys = new HashSet();
-    /** pkg + title + text fingerprints seen recently, for duplicate suppression. */
     private final Map<String, Long> recentNotifFingerprints = new HashMap();
-    /** title + text fingerprints seen recently, across packages. The same message
-     *  can arrive twice via different senders (e.g. a push service and the app
-     *  itself); the per-package fingerprint above cannot catch that. */
     private final Map<String, Long> recentNotifContentFingerprints = new HashMap();
-    /** Notification keys seen recently (sbn.getKey(), Android's native stable
-     *  key). Same key = same notification re-posted/updated, not a new one. */
     private final Map<String, Long> seenNotifKeys = new HashMap();
-    /** fixed97: content last seen under each key ("title\u0001text").
-     *  WeChat reuses one key per conversation and updates the content,
-     *  so key-alone drops every later message from the same person.
-     *  Only same key AND same content is a repeat. */
     private final Map<String, String> seenNotifKeyContent = new HashMap();
-    private static final long NOTIF_KEY_TTL_MS = 3600000;
-    /** fixed28 (ported from Flyme Island 1.0.38-r3 W()): per-package last
-     *  notification fingerprint, "id:postTime:title/text". One entry per
-     *  package, max 32 packages. A repeat fingerprint means the system
-     *  re-delivered the exact same notification — drop it with ZERO action
-     *  (no broadcast, no refresh), instead of letting it reach the bubble
-     *  and re-pop. The key cache above catches same-key re-posts; this
-     *  catches re-deliveries whose key differs but whose content is
-     *  identical, which the old dedup chain let through. */
-    private final java.util.LinkedHashMap<String, String> lastNotifFingerprintByPkg = new java.util.LinkedHashMap<String, String>(32, 0.75f, true) {
-        @Override
-        protected boolean removeEldestEntry(java.util.Map.Entry<String, String> eldest) {
+    private final LinkedHashMap<String, String> lastNotifFingerprintByPkg = new LinkedHashMap<String, String>(32, 0.75f, true) { // from class: com.jarvis.bubblenotify.NotificationService.1
+        @Override // java.util.LinkedHashMap
+        protected boolean removeEldestEntry(Map.Entry<String, String> entry) {
             return size() > 32;
         }
     };
-    // fixed11: Flyme Island-style lifecycle dedup (see DIAGNOSIS.md #36).
-    // Keyed by notification key; each state remembers the postTime and the
-    // set of individual message digests already seen for that key, so a
-    // summary that only repeats already-seen messages is not fresh. A second
-    // map tracks the latest message per conversation, so a summary of a
-    // conversation already shown is not fresh either. No time window — an
-    // old re-delivery is stale by postTime alone.
     private final Map<String, MsgState> msgStates = new HashMap();
     private final Map<String, String> lastMsgByConversation = new HashMap();
-    /** pkg + group keys of child notifications seen recently, for summary filtering. */
     private final Map<String, Long> recentNotifGroups = new HashMap();
-    /** Last notification per package, for catching unflagged group summaries. */
     private final Map<String, LastNotif> lastNotifByPkg = new HashMap();
-
-    /** Video apps whose media sessions must not show the player card/capsule.
-     *  Video is notification-only ("只播放通知就行了"). The app-category check
-     *  below catches the rest, including apps not listed here. */
-    private static final java.util.Set<String> VIDEO_PACKAGES = new java.util.HashSet<String>(java.util.Arrays.asList(
-            "tv.danmaku.bili",
-            "com.ss.android.ugc.aweme",
-            "com.ss.android.ugc.aweme.lite",
-            "com.ss.android.ugc.live",
-            "com.kuaishou.nebula",
-            "com.kuaishou.nebula.lite",
-            "com.tencent.qqlive",
-            "com.iqiyi.qyplayer",
-            "com.youku.phone",
-            "com.hunantv.imgo.activity",
-            "com.ss.android.article.video",
-            "com.baidu.video",
-            "com.sohu.sohuvideo",
-            "com.tencent.weishi",
-            "com.miui.video",
-            "com.meizu.media.video"
-    ));
-
-    /** True if this package is a video app: listed above, or its manifest
-     *  declares appCategory="video". Music apps declare "audio" instead. */
-    private boolean isVideoApp(String pkg) {
-        try {
-            if (pkg != null && VIDEO_PACKAGES.contains(pkg)) {
-                return true;
-            }
-            if (pkg != null) {
-                android.content.pm.ApplicationInfo info = getPackageManager().getApplicationInfo(pkg, 0);
-                if (info != null && info.category == android.content.pm.ApplicationInfo.CATEGORY_VIDEO) {
-                    return true;
-                }
-            }
-        } catch (Throwable th) {
-        }
-        return false;
-    }
-
-    private static class LastNotif {
-        String text;
-        long time;
-        String title;
-
-        LastNotif(String title, String text, long time) {
-            this.title = title;
-            this.text = text;
-            this.time = time;
-        }
-    }
-
-    private static class MsgState {
-        long postTime;
-        final java.util.LinkedHashSet<String> seen = new java.util.LinkedHashSet<>();
-
-        MsgState(long postTime) {
-            this.postTime = postTime;
-        }
-    }
-
-    /** fixed28 (ported from Flyme Island 1.0.38-r3 W()): true if this
-     *  package's last notification had the identical fingerprint
-     *  (id:postTime:title/text). A repeat fingerprint is a re-delivery of
-     *  the exact same notification — drop it with zero action. */
-    /** fixed136: parse a percent from notification text, e.g. "45%",
-     *  "已下载45%", "12.5MB/50MB", "12/50". Returns 0-100, or -1. */
-    // fixed140: download tick interval — same 1s cadence as the music
-    // player tick. The player polls the MediaSession; downloads poll
-    // getActiveNotifications() for the live progress.
-    private static final long DOWNLOAD_TICK_MS = 1000;
-
-    // fixed140: read live download progress from a Notification with
-    // the same multi-source logic as onNotificationPosted (extras +
-    // RemoteViews + text percent, highest wins). Returns
-    // {progress, progressMax, indeterminate(0/1)} or null if the
-    // notification carries no progress.
-    private static int[] readDownloadProgress(Notification n, String title, String text) {
-        if (n == null) {
-            return null;
-        }
-        Bundle b = n.extras;
-        int prog = b != null ? b.getInt("android.progress", 0) : 0;
-        int progMax = b != null ? b.getInt("android.progressMax", 0) : 0;
-        boolean ind = b != null && b.getBoolean("android.progressIndeterminate", false);
-        int[] rv = readProgressFromRemoteViews(n);
-        if (rv != null) {
-            int rvPct = (rv[0] * 100) / rv[1];
-            int exPct = progMax > 0 ? (prog * 100) / progMax : -1;
-            if (rvPct > exPct) {
-                prog = rv[0];
-                progMax = rv[1];
-            }
-        }
-        int textPct = parseProgressPercent(text);
-        if (textPct < 0) {
-            textPct = parseProgressPercent(title);
-        }
-        if (textPct >= 0) {
-            int curPct = progMax > 0 ? (prog * 100) / progMax : -1;
-            if (textPct > curPct) {
-                if (progMax > 0) {
-                    prog = (textPct * progMax) / 100;
-                } else {
-                    progMax = 100;
-                    prog = textPct;
-                }
-                ind = false;
-            }
-        }
-        if (progMax <= 0 && !ind) {
-            return null;
-        }
-        return new int[]{prog, progMax, ind ? 1 : 0};
-    }
-
-    // fixed140: while a download is in progress, poll the live
-    // notification state every second and push the update to the
-    // bubble when the progress moved. Re-posts itself while any
-    // download is still active, stops when none is.
-    private final Runnable downloadTickRunnable = new Runnable() {
+    // fixed181: 1s network-lyric tick (2.0's lyric poll, v84).
+    // While music is playing and network lines are loaded for the
+    // current song, re-pick the line by playback position; only
+    // re-broadcast when the line actually changed, so the music
+    // bubble's lyric rolls on even though the notification never
+    // re-posts a lyric (QQ Original / Qishui). Stops itself when
+    // music stops or the song changes.
+    private final Runnable netLyricTickRunnable = new Runnable() {
         @Override
         public void run() {
-            boolean changed = false;
-            boolean anyActive = false;
             try {
-                StatusBarNotification[] active = getActiveNotifications();
-                if (active != null) {
-                    for (StatusBarNotification sbn : active) {
-                        if (sbn == null || sbn.getNotification() == null || sbn.getKey() == null) {
-                            continue;
-                        }
-                        RecentNotif target = null;
-                        synchronized (recentNotifs) {
-                            for (RecentNotif r : recentNotifs) {
-                                if (sbn.getKey().equals(r.key)) {
-                                    target = r;
-                                    break;
-                                }
-                            }
-                        }
-                        if (target == null) {
-                            continue;
-                        }
-                        if (!(target.progressMax > 0 || target.progressIndeterminate)) {
-                            continue;
-                        }
-                        Notification n = sbn.getNotification();
-                        Bundle b = n.extras;
-                        String title = getText(b, "android.title");
-                        String text = getText(b, "android.text");
-                        if (text == null || text.isEmpty()) {
-                            text = getText(b, "android.bigText");
-                        }
-                        int[] pr = readDownloadProgress(n, title, text);
-                        if (pr == null) {
-                            continue;
-                        }
-                        boolean ind = pr[2] != 0;
-                        if (pr[0] != target.progress || pr[1] != target.progressMax || ind != target.progressIndeterminate) {
-                            target.progress = pr[0];
-                            target.progressMax = pr[1];
-                            target.progressIndeterminate = ind;
-                            changed = true;
-                        }
-                        if (ind || (pr[1] > 0 && pr[0] < pr[1])) {
-                            anyActive = true;
-                        }
-                    }
+                MediaController mc = NotificationService.this.mediaController;
+                if (mc == null || NotificationService.this.netLyricLines == null
+                        || NotificationService.this.netLyricLines.isEmpty()
+                        || NotificationService.this.netLyricSong == null) {
+                    return;
                 }
-                synchronized (recentNotifs) {
-                    for (RecentNotif r : recentNotifs) {
-                        if ((r.progressMax > 0 || r.progressIndeterminate) && (r.progressIndeterminate || r.progress < r.progressMax)) {
-                            anyActive = true;
-                            break;
-                        }
-                    }
+                PlaybackState ps = mc.getPlaybackState();
+                boolean playing = ps != null && ps.getState() == 3;
+                if (!playing) {
+                    return;
                 }
-            } catch (Throwable th) {
-                Log.e(Settings.TAG, "download tick failed", th);
-            }
-            if (changed) {
-                broadcastNotifyList();
-            }
-            if (anyActive) {
-                mainHandler.postDelayed(this, DOWNLOAD_TICK_MS);
+                long pos = ps.getPosition();
+                if (pos >= 0 && ps.getLastPositionUpdateTime() > 0) {
+                    pos += SystemClock.elapsedRealtime() - ps.getLastPositionUpdateTime();
+                }
+                String line = NetworkLyrics.lineAt(NotificationService.this.netLyricLines, pos);
+                if (line == null || line.equals(NotificationService.this.netLyricLastLine)) {
+                    NotificationService.this.mainHandler.postDelayed(NotificationService.this.netLyricTickRunnable, 1000);
+                    return;
+                }
+                NotificationService.this.netLyricLastLine = line;
+                if (NotificationService.this.netLyricTickPackage != null) {
+                    NotificationService.this.sendMusicStateFromController(NotificationService.this.netLyricTickPackage, NotificationService.this.netLyricTickIntent);
+                }
+                NotificationService.this.mainHandler.postDelayed(NotificationService.this.netLyricTickRunnable, 1000);
+            } catch (Throwable ignored) {
             }
         }
     };
 
-    private void scheduleDownloadTick() {
-        boolean any = false;
-        synchronized (recentNotifs) {
-            for (RecentNotif r : recentNotifs) {
-                if ((r.progressMax > 0 || r.progressIndeterminate) && (r.progressIndeterminate || r.progress < r.progressMax)) {
-                    any = true;
-                    break;
-                }
-            }
-        }
-        if (any) {
-            mainHandler.removeCallbacks(downloadTickRunnable);
-            mainHandler.postDelayed(downloadTickRunnable, DOWNLOAD_TICK_MS);
+    private void startNetLyricTick() {
+        try {
+            this.mainHandler.removeCallbacks(this.netLyricTickRunnable);
+            this.mainHandler.postDelayed(this.netLyricTickRunnable, 1000);
+        } catch (Throwable ignored) {
         }
     }
 
-    private static int parseProgressPercent(String s) {
-        if (s == null || s.isEmpty()) {
+    private void stopNetLyricTick() {
+        try {
+            this.mainHandler.removeCallbacks(this.netLyricTickRunnable);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // fixed181: current playback position in ms, same formula as
+    // sendMusicStateFromController.
+    private long currentMusicPositionMs() {
+        try {
+            MediaController mc = this.mediaController;
+            if (mc == null) {
+                return -1;
+            }
+            PlaybackState ps = mc.getPlaybackState();
+            if (ps == null) {
+                return -1;
+            }
+            long pos = ps.getPosition();
+            if (pos >= 0 && ps.getLastPositionUpdateTime() > 0) {
+                pos += SystemClock.elapsedRealtime() - ps.getLastPositionUpdateTime();
+            }
+            return pos;
+        } catch (Throwable ignored) {
             return -1;
         }
-        try {
-            java.util.regex.Matcher m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%").matcher(s);
-            if (m.find()) {
-                float f = Float.parseFloat(m.group(1));
-                if (f >= 0.0f && f <= 100.0f) {
-                    return Math.round(f);
-                }
-            }
-            m = java.util.regex.Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(?:MB|KB|GB|B)?\\s*/\\s*(\\d+(?:\\.\\d+)?)\\s*(?:MB|KB|GB|B)?").matcher(s);
-            if (m.find()) {
-                float a = Float.parseFloat(m.group(1));
-                float b = Float.parseFloat(m.group(2));
-                if (b > 0.0f && a >= 0.0f && a <= b) {
-                    return Math.round((a * 100.0f) / b);
-                }
-            }
-        } catch (Throwable ignored) {
-        }
-        return -1;
     }
 
-    /** fixed136: read the ProgressBar from the notification RemoteViews.
-     *  Custom download notifications update the bar in the RemoteViews
-     *  but leave the extras at 0. Returns {progress, max} or null. */
-    private static int[] readProgressFromRemoteViews(Notification n) {
+    // fixed181: the network line for the current song at the
+    // current position, or null (no lines, or the song changed).
+    private String netLyricLineAt(String song, String artist, long positionMs) {
         try {
-            android.widget.RemoteViews rv = n.contentView;
-            if (rv == null) {
-                rv = n.bigContentView;
-            }
-            if (rv == null) {
+            if (this.netLyricLines == null || this.netLyricLines.isEmpty()
+                    || song == null || !song.equals(this.netLyricSong)) {
                 return null;
             }
-            java.lang.reflect.Field f = android.widget.RemoteViews.class.getDeclaredField("mActions");
-            f.setAccessible(true);
-            java.util.ArrayList actions = (java.util.ArrayList) f.get(rv);
-            if (actions == null) {
+            if (artist != null && this.netLyricArtist != null
+                    && !artist.equals(this.netLyricArtist)) {
                 return null;
             }
-            int max = -1;
-            int prog = -1;
-            for (Object a : actions) {
-                if (a == null) {
-                    continue;
-                }
-                Class c = a.getClass();
-                if (!c.getSimpleName().equals("ReflectionAction")) {
-                    continue;
-                }
-                java.lang.reflect.Field mf = c.getDeclaredField("methodName");
-                mf.setAccessible(true);
-                String method = (String) mf.get(a);
-                java.lang.reflect.Field vf = c.getDeclaredField("value");
-                vf.setAccessible(true);
-                Object v = vf.get(a);
-                if ("setMax".equals(method) && (v instanceof Number)) {
-                    max = ((Number) v).intValue();
-                } else if ("setProgress".equals(method) && (v instanceof Number)) {
-                    prog = ((Number) v).intValue();
-                }
+            if (positionMs < 0) {
+                positionMs = currentMusicPositionMs();
             }
-            if (max > 0 && prog >= 0) {
-                return new int[]{prog, max};
+            if (positionMs < 0) {
+                return null;
             }
+            return NetworkLyrics.lineAt(this.netLyricLines, positionMs);
         } catch (Throwable ignored) {
-        }
-        return null;
-    }
-
-    private boolean isRepeatNotifFingerprint(String pkg, android.service.notification.StatusBarNotification sbn, String title, String text, int progress, int progressMax) {
-        if (pkg == null || sbn == null) {
-            return false;
-        }
-        try {
-            // fixed136: include progress, so a progress change is not a
-            // repeat even if postTime/title/text are unchanged.
-            String fp = sbn.getId() + ":" + sbn.getPostTime() + ":" + (title == null ? "" : title) + "/" + (text == null ? "" : text) + ":" + progress + "/" + progressMax;
-            synchronized (this.lastNotifFingerprintByPkg) {
-                String last = this.lastNotifFingerprintByPkg.get(pkg);
-                if (fp.equals(last)) {
-                    return true;
-                }
-                this.lastNotifFingerprintByPkg.put(pkg, fp);
-            }
-        } catch (Throwable th) {
-        }
-        return false;
-    }
-
-    /** True if this notification key was already shown with the SAME
-     *  content within the TTL. sbn.getKey() stays the same when an app
-     *  updates a notification's content (WeChat reuses one key per
-     *  conversation), so key-alone would drop every later message from
-     *  the same person. Only same key AND same title+text is a repeat
-     *  (identical re-delivery); new content under the same key is a new
-     *  notification and pops once. */
-    private boolean isRepeatNotifKey(String key, String title, String text, int progress, int progressMax) {
-        if (key == null) {
-            return false;
-        }
-        try {
-            // fixed133: include progress in the content, so a progress update
-            // (same key/title/text, new progress) counts as new content and
-            // refreshes the bubble instead of being dropped as a duplicate.
-            String content = (title == null ? "" : title) + "\u0001" + (text == null ? "" : text) + "\u0001" + progress + "/" + progressMax;
-            long now = SystemClock.uptimeMillis();
-            synchronized (this.seenNotifKeys) {
-                Long last = this.seenNotifKeys.get(key);
-                String lastContent = this.seenNotifKeyContent.get(key);
-                if (last != null && now - last.longValue() < NOTIF_KEY_TTL_MS && content.equals(lastContent)) {
-                    return true;
-                }
-                this.seenNotifKeys.put(key, Long.valueOf(now));
-                this.seenNotifKeyContent.put(key, content);
-                if (this.seenNotifKeys.size() > 128) {
-                    java.util.Iterator<Map.Entry<String, Long>> it = this.seenNotifKeys.entrySet().iterator();
-                    while (it.hasNext()) {
-                        Map.Entry<String, Long> e = it.next();
-                        if (now - e.getValue().longValue() > NOTIF_KEY_TTL_MS) {
-                            it.remove();
-                            this.seenNotifKeyContent.remove(e.getKey());
-                        }
-                    }
-                }
-            }
-        } catch (Throwable th) {
-        }
-        return false;
-    }
-
-    /** True if the same pkg + title + text was already posted within the dedup window. */
-    private boolean isDuplicateNotif(String pkg, String title, String text) {
-        try {
-            String fp = pkg + "\u0001" + (title == null ? "" : title) + "\u0001" + (text == null ? "" : text);
-            long now = SystemClock.uptimeMillis();
-            synchronized (this.recentNotifFingerprints) {
-                Long last = this.recentNotifFingerprints.get(fp);
-                if (last != null && now - last.longValue() < NOTIF_DEDUP_WINDOW_MS) {
-                    return true;
-                }
-                this.recentNotifFingerprints.put(fp, Long.valueOf(now));
-                if (this.recentNotifFingerprints.size() > 64) {
-                    java.util.Iterator<Map.Entry<String, Long>> it = this.recentNotifFingerprints.entrySet().iterator();
-                    while (it.hasNext()) {
-                        if (now - it.next().getValue().longValue() > NOTIF_DEDUP_WINDOW_MS) {
-                            it.remove();
-                        }
-                    }
-                }
-            }
-            synchronized (this.recentNotifContentFingerprints) {
-                String contentFp = (title == null ? "" : title) + "\u0001" + (text == null ? "" : text);
-                Long lastContent = this.recentNotifContentFingerprints.get(contentFp);
-                if (lastContent != null && now - lastContent.longValue() < NOTIF_DEDUP_WINDOW_MS) {
-                    return true;
-                }
-                this.recentNotifContentFingerprints.put(contentFp, Long.valueOf(now));
-                if (this.recentNotifContentFingerprints.size() > 64) {
-                    java.util.Iterator<Map.Entry<String, Long>> it2 = this.recentNotifContentFingerprints.entrySet().iterator();
-                    while (it2.hasNext()) {
-                        if (now - it2.next().getValue().longValue() > NOTIF_DEDUP_WINDOW_MS) {
-                            it2.remove();
-                        }
-                    }
-                }
-            }
-            synchronized (this.lastNotifByPkg) {
-                LastNotif prev = this.lastNotifByPkg.get(pkg);
-                if (prev != null && now - prev.time < NOTIF_DEDUP_WINDOW_MS
-                        && isSummaryOf(prev, title, text)) {
-                    return true;
-                }
-                if (prev != null && now - prev.time < NOTIF_SUMMARY_WINDOW_MS
-                        && isAggregatedSummaryOf(prev, title, text)) {
-                    return true;
-                }
-                this.lastNotifByPkg.put(pkg, new LastNotif(title, text, now));
-                if (this.lastNotifByPkg.size() > 32) {
-                    this.lastNotifByPkg.clear();
-                }
-            }
-            return false;
-        } catch (Throwable th) {
-            return false;
+            return null;
         }
     }
 
-    /**
-     * True if the new notification looks like an aggregation of the previous one
-     * from the same package: same title (sender), and one text contains the other
-     * plus the title. This catches group summaries that are not flagged with
-     * FLAG_GROUP_SUMMARY, e.g. WeChat's "[5条]test: 111" after "test: 111".
-     */
-    private static boolean isSummaryOf(LastNotif prev, String title, String text) {
+    // fixed181: fetch LRCLIB lyrics once per song on a background
+    // thread (2.0 maybeFetchNetworkLyrics). Guards: already
+    // fetching, same song already fetching, already have lines
+    // for this exact song. On success store the timed lines and
+    // start the 1s tick so the lyric rolls on.
+    private void maybeFetchNetworkLyrics(String song, String artist, long durationMs) {
         try {
-            if (prev.title == null || title == null || !prev.title.equals(title)) {
-                return false;
-            }
-            if (prev.text == null || text == null || prev.text.isEmpty() || text.isEmpty()) {
-                return false;
-            }
-            if (text.contains(prev.text) && text.contains(title)) {
-                return true;
-            }
-            return prev.text.contains(text) && prev.text.contains(title);
-        } catch (Throwable th) {
-            return false;
-        }
-    }
-
-    /**
-     * True if the new notification is a WeChat-style aggregated summary
-     * ("[5条]test: 111") of a message we already showed. The plain contains-check
-     * in isSummaryOf misses it when both the count and the message changed
-     * ("[5条]test: 111" vs "[6条]test: 222" contain neither each other), which is
-     * why the bubble popped twice once unread messages piled up.
-     */
-    private static boolean isAggregatedSummaryOf(LastNotif prev, String title, String text) {
-        try {
-            String sender = Settings.summarySender(text);
-            if (sender == null) {
-                return false;
-            }
-            if (prev.title != null && prev.title.equals(sender)) {
-                return true;
-            }
-            return prev.text != null && !prev.text.isEmpty() && text.contains(prev.text);
-        } catch (Throwable th) {
-            return false;
-        }
-    }
-
-    /** True if this is a group summary whose child notification was already shown. */
-    private boolean isRedundantGroupSummary(Notification notification, String pkg) {
-        try {
-            if ((notification.flags & Notification.FLAG_GROUP_SUMMARY) == 0) {
-                return false;
-            }
-            String group = notification.getGroup();
-            if (group == null) {
-                return false;
-            }
-            long now = SystemClock.uptimeMillis();
-            synchronized (this.recentNotifGroups) {
-                Long last = this.recentNotifGroups.get(pkg + "\u0001" + group);
-                return last != null && now - last.longValue() < NOTIF_GROUP_WINDOW_MS;
-            }
-        } catch (Throwable th) {
-            return false;
-        }
-    }
-
-    private void noteNotifGroup(Notification notification, String pkg) {
-        try {
-            if ((notification.flags & Notification.FLAG_GROUP_SUMMARY) != 0) {
+            if (song == null || song.isEmpty() || this.netLyricFetching) {
                 return;
             }
-            String group = notification.getGroup();
-            if (group == null) {
+            String key = song + "\u0000" + (artist == null ? "" : artist);
+            if (key.equals(this.netLyricFetchingFor)) {
                 return;
             }
-            long now = SystemClock.uptimeMillis();
-            synchronized (this.recentNotifGroups) {
-                this.recentNotifGroups.put(pkg + "\u0001" + group, Long.valueOf(now));
-                if (this.recentNotifGroups.size() > 64) {
-                    this.recentNotifGroups.clear();
-                }
+            if (song.equals(this.netLyricSong)
+                    && (artist == null ? this.netLyricArtist == null : artist.equals(this.netLyricArtist))
+                    && this.netLyricLines != null && !this.netLyricLines.isEmpty()) {
+                return;
             }
-        } catch (Throwable th) {
-        }
-    }
-
-    /**
-     * fixed11: Flyme Island-style lifecycle dedup. Instead of matching
-     * the summary's text format ("[N条]sender: msg") inside a time window,
-     * track each notification by its KEY and remember which individual
-     * messages were already seen for that key and for that conversation:
-     *  - STALE: this postTime is older than the stored one for the key
-     *    (an old re-delivery) -> redundant.
-     *  - every message in this snapshot was already seen for this key, or
-     *    its latest message equals the conversation's latest -> redundant.
-     * Otherwise record the messages and return false (fresh, show it).
-     * Message digests come from android.messages (MessagingStyle), falling
-     * back to android.textLines, then to title+text. No time window is
-     * involved, so a late summary is still caught.
-     */
-    private boolean isRedundantMessage(android.service.notification.StatusBarNotification sbn, Notification notification, Bundle bundle, String pkg, String title, String text) {
-        if (sbn == null || sbn.getKey() == null) {
-            return false;
-        }
-        // fixed12: applies to ALL apps, not just WeChat/QQ. The lifecycle
-        // mechanism (per-key seen-set + postTime STALE + per-conversation
-        // latest) is generic: a re-post of the same notification, or a
-        // summary that only repeats already-seen messages, is redundant no
-        // matter which app posted it.
-        try {
-            java.util.ArrayList<String> messages = new java.util.ArrayList<>();
-            if (bundle != null) {
-                android.os.Parcelable[] parcelableArray = bundle.getParcelableArray("android.messages");
-                if (parcelableArray != null) {
-                    for (int i = Math.max(0, parcelableArray.length - 25); i < parcelableArray.length; i++) {
-                        if (parcelableArray[i] instanceof Bundle) {
-                            Bundle m = (Bundle) parcelableArray[i];
-                            CharSequence t = m.getCharSequence("text");
-                            if (t != null && t.length() > 0) {
-                                CharSequence sender = m.getCharSequence("sender");
-                                String s = sender == null ? "" : sender.toString();
-                                messages.add(s + "" + t.toString());
-                            }
+            this.netLyricFetching = true;
+            this.netLyricFetchingFor = key;
+            final String fSong = song;
+            final String fArtist = artist;
+            final long fDurMs = durationMs;
+            new Thread(new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        String lrc = NetworkLyrics.fetchSyncedLrc(fSong, fArtist, null, fDurMs);
+                        if (lrc == null || lrc.isEmpty()) {
+                            return;
                         }
-                    }
-                }
-                if (messages.isEmpty()) {
-                    CharSequence[] lines = bundle.getCharSequenceArray("android.textLines");
-                    if (lines != null) {
-                        for (int i = Math.max(0, lines.length - 25); i < lines.length; i++) {
-                            if (lines[i] != null && lines[i].length() > 0) {
-                                messages.add(lines[i].toString());
-                            }
+                        final java.util.List<NetworkLyrics.Line> lines = NetworkLyrics.parseLrc(lrc);
+                        if (lines == null || lines.isEmpty()) {
+                            return;
                         }
-                    }
-                }
-            }
-            if (messages.isEmpty()) {
-                String content = (title == null ? "" : title) + "" + (text == null ? "" : text);
-                if (!content.trim().isEmpty()) {
-                    messages.add(content);
-                }
-            }
-            if (messages.isEmpty()) {
-                return false;
-            }
-            String conversation = null;
-            if (bundle != null) {
-                CharSequence convTitle = bundle.getCharSequence("android.conversationTitle");
-                String conv = convTitle == null ? "" : convTitle.toString();
-                if (conv.isEmpty() && notification != null && notification.getShortcutId() != null) {
-                    conv = notification.getShortcutId();
-                }
-                if (conv.isEmpty() && title != null && !title.isEmpty() && !"微信".equals(title) && !"QQ".equals(title) && !title.contains("条新消息") && !title.contains("新消息")) {
-                    conv = title;
-                }
-                if (!conv.isEmpty()) {
-                    conversation = pkg + "" + conv;
-                }
-            }
-            String latest = messages.get(messages.size() - 1);
-            String key = sbn.getKey();
-            long postTime = sbn.getPostTime();
-            synchronized (this.msgStates) {
-                MsgState state = this.msgStates.get(key);
-                if (state != null && postTime < state.postTime) {
-                    return true;
-                }
-                if (state == null) {
-                    state = new MsgState(postTime);
-                    this.msgStates.put(key, state);
-                    if (this.msgStates.size() > 256) {
-                        java.util.Iterator<String> it = this.msgStates.keySet().iterator();
-                        if (it.hasNext()) {
-                            it.next();
-                            it.remove();
-                        }
-                    }
-                } else {
-                    state.postTime = postTime;
-                }
-                boolean allSeen = true;
-                for (String m : messages) {
-                    if (!state.seen.contains(m)) {
-                        allSeen = false;
-                        break;
-                    }
-                }
-                if (allSeen) {
-                    return true;
-                }
-                if (conversation != null) {
-                    synchronized (this.lastMsgByConversation) {
-                        String last = this.lastMsgByConversation.get(conversation);
-                        if (last != null && last.equals(latest)) {
-                            for (String m : messages) {
-                                state.seen.add(m);
-                                if (state.seen.size() > 64) {
-                                    state.seen.remove(state.seen.iterator().next());
+                        NotificationService.this.mainHandler.post(new Runnable() {
+                            @Override
+                            public void run() {
+                                try {
+                                    NotificationService.this.netLyricSong = fSong;
+                                    NotificationService.this.netLyricArtist = fArtist;
+                                    NotificationService.this.netLyricLines = lines;
+                                    NotificationService.this.netLyricLastLine = null;
+                                    NotificationService.this.startNetLyricTick();
+                                    // Push the first line out now so
+                                    // the bubble shows a lyric without
+                                    // waiting for the next re-post.
+                                    if (NotificationService.this.netLyricTickPackage != null) {
+                                        NotificationService.this.sendMusicStateFromController(NotificationService.this.netLyricTickPackage, NotificationService.this.netLyricTickIntent);
+                                    }
+                                    FileLog.i("netLyric loaded song=" + fSong + " lines=" + lines.size());
+                                } catch (Throwable ignored) {
                                 }
                             }
-                            return true;
-                        }
+                        });
+                    } catch (Throwable ignored) {
+                    } finally {
+                        NotificationService.this.netLyricFetching = false;
                     }
                 }
-                for (String m : messages) {
-                    state.seen.add(m);
-                    if (state.seen.size() > 64) {
-                        state.seen.remove(state.seen.iterator().next());
-                    }
-                }
-                if (conversation != null) {
-                    synchronized (this.lastMsgByConversation) {
-                        this.lastMsgByConversation.put(conversation, latest);
-                        if (this.lastMsgByConversation.size() > 256) {
-                            java.util.Iterator<String> it = this.lastMsgByConversation.keySet().iterator();
-                            if (it.hasNext()) {
-                                it.next();
-                                it.remove();
-                            }
-                        }
-                    }
-                }
-            }
-            return false;
-        } catch (Throwable th) {
-            return false;
+            }).start();
+        } catch (Throwable ignored) {
         }
     }
 
-    private final BroadcastReceiver commandReceiver = new BroadcastReceiver() { // from class: com.jarvis.bubblenotify.NotificationService.1
+    private final BroadcastReceiver commandReceiver = new BroadcastReceiver() { // from class: com.jarvis.bubblenotify.NotificationService.3
         @Override // android.content.BroadcastReceiver
         public void onReceive(Context context, Intent intent) {
             String stringExtra;
@@ -780,6 +290,10 @@ public class NotificationService extends NotificationListenerService {
             try {
                 if (Settings.ACTION_MUSIC_CONTROL.equals(intent.getAction())) {
                     NotificationService.this.handleMusicControl(intent.getStringExtra(Settings.EXTRA_CONTROL), intent.getLongExtra(Settings.EXTRA_SEEK_POSITION, -1L));
+                    return;
+                }
+                if (Settings.ACTION_CALL_CONTROL.equals(intent.getAction())) {
+                    NotificationService.this.fireCallAction(intent.getStringExtra(Settings.EXTRA_CONTROL));
                     return;
                 }
                 if (Settings.ACTION_DISMISS.equals(intent.getAction()) && (stringExtra = intent.getStringExtra(Settings.EXTRA_KEY)) != null) {
@@ -811,6 +325,541 @@ public class NotificationService extends NotificationListenerService {
     };
     private boolean commandReceiverRegistered = false;
 
+    private boolean isPushService(String str) {
+        if (str == null) {
+            return false;
+        }
+        if (PUSH_SERVICE_PACKAGES.contains(str)) {
+            return true;
+        }
+        try {
+            CharSequence applicationLabel = getPackageManager().getApplicationLabel(getPackageManager().getApplicationInfo(str, 0));
+            return applicationLabel != null && "推送服务".equals(applicationLabel.toString());
+        } catch (Throwable th) {
+        }
+        return false;
+    }
+
+    // fixed176: the notification key is "userId|pkg|id|tag|uid" — the
+    // pkg field is the ORIGINAL app, which is what a push service
+    // posts on behalf of (e.g. com.hpbr.bosszhipin for BOSS).
+    private String keyPackage(String key) {
+        if (key == null) {
+            return null;
+        }
+        try {
+            String[] parts = key.split("\\|");
+            if (parts.length >= 2) {
+                return parts[1];
+            }
+        } catch (Throwable ignored) {
+        }
+        return null;
+    }
+
+    // fixed176: true when the package is installed on the device
+    // (its app label resolves) — guards the key-package lookup so a
+    // stale/unknown package never becomes the display package.
+    private boolean isInstalledApp(String pkg) {
+        if (pkg == null || pkg.isEmpty()) {
+            return false;
+        }
+        try {
+            return getPackageManager().getApplicationInfo(pkg, 0) != null;
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    private boolean isVideoApp(String str) {
+        ApplicationInfo applicationInfo;
+        if (str != null) {
+            try {
+                if (VIDEO_PACKAGES.contains(str)) {
+                    return true;
+                }
+                if (str == null && (applicationInfo = getPackageManager().getApplicationInfo(str, 0)) != null && applicationInfo.category == 2) {
+                    return true;
+                }
+            } catch (Throwable th) {
+            }
+        } else if (str == null) {
+        }
+        return false;
+    }
+
+    private static class LastNotif {
+        String text;
+        long time;
+        String title;
+
+        LastNotif(String str, String str2, long j) {
+            this.title = str;
+            this.text = str2;
+            this.time = j;
+        }
+    }
+
+    private static class MsgState {
+        long postTime;
+        final LinkedHashSet<String> seen = new LinkedHashSet<>();
+
+        MsgState(long j) {
+            this.postTime = j;
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    /* JADX WARN: Code duplicated, block: B:37:0x0064  */
+
+    // fixed193: does the live title/text say the download is
+    // done? (2.0 v242). Apps rewrite the notification as "下载完成"
+    // (and drop the progress extras) instead of posting 100%.
+
+
+    // fixed193: live download progress refresh (2.0 v95/v98/v99/
+    // v240/v241/v242). Re-reads the active download notification(s)
+    // and updates the capsule in real time; detects completion
+    // (progress 100% or a completion word) and a vanished
+    // notification (gone for 2 ticks). Only broadcasts when
+    // something visible actually changed.
+    // fixed200: forward a diagnostic line to SystemUI.
+    // The listener service (app uid) cannot write to /sdcard/
+    // (scoped storage), so it broadcasts the line and SystemUI
+    // (system uid) appends it to /sdcard/BubbleNotify.log, the
+    // file the user can read. Best-effort, never throws.
+
+    /** v240: speed straight from the text, e.g. TapTap's
+     * "40.81 MB/s  剩余时间 35秒". Returns bytes/sec, or -1. */
+
+    /** v240: ETA seconds from the text. TapTap: "剩余时间 35秒";
+     * browser subText: "还剩 43 秒". Returns seconds, or -1. */
+
+    /** v239/v240/v241: line 1 = file name (what is downloading);
+     * line 2 = progress details — "正在下载 45%" + " · 12.5MB/48MB"
+     * (byte counts, when the notification carries a real byte
+     * total) + " · 2.3MB/s" (when a speed sample exists) +
+     * " · 还剩35秒" (ETA from the text). */
+
+    // fixed195: 2.0 download set (v95/v98/v99/v239/v240) — the
+    // whole 2.0 progress reading, ported. Root cause of
+    // "一直是0%": a download app reports progress in BYTES
+    // (progressMax = total bytes, e.g. 1.75GB), and the old code
+    // did `progress * 100` in INT — 83MB * 100 overflows int and
+    // the percent comes out 0. 2.0 reads the percent with LONG
+    // arithmetic and also parses byte counts out of the text
+    // ("已下载 79.26 MB，共 1.75 GB", Coolapk "2.03M/1.98G").
+    /** v239: raw byte counts (progress / progressMax) when the
+     * notification carries a real byte total. Returns null when
+     * progress is percent-based (progressMax <= 100) or absent.
+     * Extras first, then RemoteViews. */
+
+    /** v240: parse a size like "2.03M", "1.98G", "79.26 MB",
+     * "1.75 GB", "0.00 KB" into bytes. Units B/KB/MB/GB and the
+     * bare K/M/G, with or without a space. -1 if unparsable. */
+
+    /** v240: downloaded/total from the text fields. Coolapk puts
+     * it in infoText as "2.03M/1.98G"; the browser puts it in
+     * text as "已下载 79.26 MB，共 1.75 GB". Returns
+     * {downloaded, total} in bytes, or null. */
+
+    /** v95/v98/v99: download percent the 2.0 way — the max of
+     * extras / RemoteViews / text percent, then byte counts from
+     * the text (Coolapk / browser) or from extras/RemoteViews
+     * when progressMax > 100. LONG arithmetic throughout, so a
+     * byte total never overflows the percent. -1 if nothing
+     * usable. */
+
+
+    private boolean isRepeatNotifFingerprint(String str, StatusBarNotification statusBarNotification, String str2, String str3, int i, int i2) {
+        if (str == null || statusBarNotification == null) {
+            return false;
+        }
+        try {
+            int id = statusBarNotification.getId();
+            long postTime = statusBarNotification.getPostTime();
+            if (str2 == null) {
+                str2 = "";
+            }
+            if (str3 == null) {
+                str3 = "";
+            }
+            String str4 = id + ":" + postTime + ":" + str2 + "/" + str3 + ":" + i + "/" + i2;
+            synchronized (this.lastNotifFingerprintByPkg) {
+                if (str4.equals(this.lastNotifFingerprintByPkg.get(str))) {
+                    return true;
+                }
+                this.lastNotifFingerprintByPkg.put(str, str4);
+                return false;
+            }
+        } catch (Throwable th) {
+        }
+        return false;
+    }
+
+    private boolean isRepeatNotifKey(String str, String str2, String str3, int i, int i2) {
+        if (str == null) {
+            return false;
+        }
+        if (str2 == null) {
+            str2 = "";
+        }
+        if (str3 == null) {
+            str3 = "";
+        }
+        try {
+            String str4 = str2 + "\u0001" + str3 + "\u0001" + i + "/" + i2;
+            long jUptimeMillis = SystemClock.uptimeMillis();
+            synchronized (this.seenNotifKeys) {
+                Long l = this.seenNotifKeys.get(str);
+                String str5 = this.seenNotifKeyContent.get(str);
+                if (l != null && jUptimeMillis - l.longValue() < NOTIF_KEY_TTL_MS && str4.equals(str5)) {
+                    return true;
+                }
+                this.seenNotifKeys.put(str, Long.valueOf(jUptimeMillis));
+                this.seenNotifKeyContent.put(str, str4);
+                if (this.seenNotifKeys.size() > 128) {
+                    Iterator<Map.Entry<String, Long>> it = this.seenNotifKeys.entrySet().iterator();
+                    while (it.hasNext()) {
+                        Map.Entry<String, Long> next = it.next();
+                        if (jUptimeMillis - next.getValue().longValue() > NOTIF_KEY_TTL_MS) {
+                            it.remove();
+                            this.seenNotifKeyContent.remove(next.getKey());
+                        }
+                    }
+                }
+                return false;
+            }
+        } catch (Throwable th) {
+        }
+        return false;
+    }
+
+    private boolean isDuplicateNotif(String str, String str2, String str3) {
+        try {
+            String str4 = str + "\u0001" + (str2 == null ? "" : str2) + "\u0001" + (str3 == null ? "" : str3);
+            long jUptimeMillis = SystemClock.uptimeMillis();
+            synchronized (this.recentNotifFingerprints) {
+                Long l = this.recentNotifFingerprints.get(str4);
+                if (l != null && jUptimeMillis - l.longValue() < NOTIF_DEDUP_WINDOW_MS) {
+                    return true;
+                }
+                this.recentNotifFingerprints.put(str4, Long.valueOf(jUptimeMillis));
+                if (this.recentNotifFingerprints.size() > 64) {
+                    Iterator<Map.Entry<String, Long>> it = this.recentNotifFingerprints.entrySet().iterator();
+                    while (it.hasNext()) {
+                        if (jUptimeMillis - it.next().getValue().longValue() > NOTIF_DEDUP_WINDOW_MS) {
+                            it.remove();
+                        }
+                    }
+                }
+                synchronized (this.recentNotifContentFingerprints) {
+                    try {
+                        String str5 = (str2 == null ? "" : str2) + "\u0001" + (str3 == null ? "" : str3);
+                        Long l2 = this.recentNotifContentFingerprints.get(str5);
+                        if (l2 != null && jUptimeMillis - l2.longValue() < NOTIF_DEDUP_WINDOW_MS) {
+                            return true;
+                        }
+                        this.recentNotifContentFingerprints.put(str5, Long.valueOf(jUptimeMillis));
+                        if (this.recentNotifContentFingerprints.size() > 64) {
+                            Iterator<Map.Entry<String, Long>> it2 = this.recentNotifContentFingerprints.entrySet().iterator();
+                            while (it2.hasNext()) {
+                                if (jUptimeMillis - it2.next().getValue().longValue() > NOTIF_DEDUP_WINDOW_MS) {
+                                    it2.remove();
+                                }
+                            }
+                        }
+                        synchronized (this.lastNotifByPkg) {
+                            LastNotif lastNotif = this.lastNotifByPkg.get(str);
+                            if (lastNotif != null && jUptimeMillis - lastNotif.time < NOTIF_DEDUP_WINDOW_MS && isSummaryOf(lastNotif, str2, str3)) {
+                                return true;
+                            }
+                            if (lastNotif != null && jUptimeMillis - lastNotif.time < NOTIF_SUMMARY_WINDOW_MS && isAggregatedSummaryOf(lastNotif, str2, str3)) {
+                                return true;
+                            }
+                            this.lastNotifByPkg.put(str, new LastNotif(str2, str3, jUptimeMillis));
+                            if (this.lastNotifByPkg.size() > 32) {
+                                this.lastNotifByPkg.clear();
+                            }
+                            return false;
+                        }
+                    } catch (Throwable th) {
+                        throw th;
+                    }
+                }
+            }
+        } catch (Throwable th2) {
+            return false;
+        }
+    }
+
+    private static boolean isSummaryOf(LastNotif lastNotif, String str, String str2) {
+        try {
+            if (lastNotif.title != null && str != null && lastNotif.title.equals(str) && lastNotif.text != null && str2 != null && !lastNotif.text.isEmpty() && !str2.isEmpty()) {
+                if (str2.contains(lastNotif.text) && str2.contains(str)) {
+                    return true;
+                }
+                return lastNotif.text.contains(str2) && lastNotif.text.contains(str);
+            }
+            return false;
+        } catch (Throwable th) {
+            return false;
+        }
+    }
+
+    private static boolean isAggregatedSummaryOf(LastNotif lastNotif, String str, String str2) {
+        try {
+            String strSummarySender = Settings.summarySender(str2);
+            if (strSummarySender == null) {
+                return false;
+            }
+            if (lastNotif.title == null || !lastNotif.title.equals(strSummarySender)) {
+                return (lastNotif.text == null || lastNotif.text.isEmpty() || !str2.contains(lastNotif.text)) ? false : true;
+            }
+            return true;
+        } catch (Throwable th) {
+            return false;
+        }
+    }
+
+    private boolean isRedundantGroupSummary(Notification notification, String str) {
+        String group;
+        boolean z;
+        try {
+            if ((notification.flags & 512) == 0 || (group = notification.getGroup()) == null) {
+                return false;
+            }
+            long jUptimeMillis = SystemClock.uptimeMillis();
+            synchronized (this.recentNotifGroups) {
+                Long l = this.recentNotifGroups.get(str + "\u0001" + group);
+                z = l != null && jUptimeMillis - l.longValue() < NOTIF_GROUP_WINDOW_MS;
+            }
+            return z;
+        } catch (Throwable th) {
+            return false;
+        }
+    }
+
+    /* JADX WARN: Bottom block not found for handler: all -> 0x0049 */
+    /* JADX WARN: Code restructure failed: missing block: B:19:0x004a, code lost:
+    
+        return;
+     */
+    /*
+        Code decompiled incorrectly, please refer to instructions dump.
+        To view partially-correct add '--show-bad-code' argument
+    */
+    private void noteNotifGroup(android.app.Notification r6, java.lang.String r7) {
+        /*
+            r5 = this;
+            int r0 = r6.flags     // Catch: java.lang.Throwable -> L49
+            r0 = r0 & 512(0x200, float:7.17E-43)
+            if (r0 == 0) goto L7
+            return
+        L7:
+            java.lang.String r6 = r6.getGroup()     // Catch: java.lang.Throwable -> L49
+            if (r6 != 0) goto Le
+            return
+        Le:
+            long r0 = android.os.SystemClock.uptimeMillis()     // Catch: java.lang.Throwable -> L49
+            java.util.Map<java.lang.String, java.lang.Long> r2 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L49
+            monitor-enter(r2)     // Catch: java.lang.Throwable -> L49
+            java.util.Map<java.lang.String, java.lang.Long> r3 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L46
+            java.lang.StringBuilder r4 = new java.lang.StringBuilder     // Catch: java.lang.Throwable -> L46
+            r4.<init>()     // Catch: java.lang.Throwable -> L46
+            java.lang.StringBuilder r7 = r4.append(r7)     // Catch: java.lang.Throwable -> L46
+            java.lang.String r4 = "\u0001"
+            java.lang.StringBuilder r7 = r7.append(r4)     // Catch: java.lang.Throwable -> L46
+            java.lang.StringBuilder r6 = r7.append(r6)     // Catch: java.lang.Throwable -> L46
+            java.lang.String r6 = r6.toString()     // Catch: java.lang.Throwable -> L46
+            java.lang.Long r7 = java.lang.Long.valueOf(r0)     // Catch: java.lang.Throwable -> L46
+            r3.put(r6, r7)     // Catch: java.lang.Throwable -> L46
+            java.util.Map<java.lang.String, java.lang.Long> r6 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L46
+            int r6 = r6.size()     // Catch: java.lang.Throwable -> L46
+            r7 = 64
+            if (r6 <= r7) goto L44
+            java.util.Map<java.lang.String, java.lang.Long> r6 = r5.recentNotifGroups     // Catch: java.lang.Throwable -> L46
+            r6.clear()     // Catch: java.lang.Throwable -> L46
+        L44:
+            monitor-exit(r2)     // Catch: java.lang.Throwable -> L46
+            goto L4a
+        L46:
+            r6 = move-exception
+            monitor-exit(r2)     // Catch: java.lang.Throwable -> L46
+            throw r6     // Catch: java.lang.Throwable -> L49
+        L49:
+            r6 = move-exception
+        L4a:
+            return
+        */
+        throw new UnsupportedOperationException("Method not decompiled: com.jarvis.bubblenotify.NotificationService.noteNotifGroup(android.app.Notification, java.lang.String):void");
+    }
+
+    /* JADX WARN: Code duplicated, block: B:137:0x021a A[Catch: all -> 0x026c, TryCatch #1 {, blocks: (B:85:0x0161, B:87:0x016b, B:89:0x0171, B:93:0x0177, B:95:0x0189, B:97:0x0199, B:100:0x01a2, B:101:0x01a7, B:103:0x01ad, B:109:0x01c2, B:113:0x01c8, B:114:0x01ca, B:127:0x0209, B:133:0x020f, B:134:0x0210, B:135:0x0214, B:137:0x021a, B:139:0x022d, B:142:0x023f, B:143:0x0241, B:153:0x0269, B:154:0x026a, B:99:0x01a0, B:144:0x0242, B:146:0x024f, B:148:0x025f, B:149:0x0265, B:115:0x01cb, B:117:0x01d5, B:119:0x01db, B:120:0x01df, B:122:0x01e5, B:124:0x01f8, B:126:0x0208, B:129:0x020b), top: B:164:0x0161, outer: #3, inners: #0, #2 }] */
+    /* JADX WARN: Code duplicated, block: B:139:0x022d A[Catch: all -> 0x026c, TryCatch #1 {, blocks: (B:85:0x0161, B:87:0x016b, B:89:0x0171, B:93:0x0177, B:95:0x0189, B:97:0x0199, B:100:0x01a2, B:101:0x01a7, B:103:0x01ad, B:109:0x01c2, B:113:0x01c8, B:114:0x01ca, B:127:0x0209, B:133:0x020f, B:134:0x0210, B:135:0x0214, B:137:0x021a, B:139:0x022d, B:142:0x023f, B:143:0x0241, B:153:0x0269, B:154:0x026a, B:99:0x01a0, B:144:0x0242, B:146:0x024f, B:148:0x025f, B:149:0x0265, B:115:0x01cb, B:117:0x01d5, B:119:0x01db, B:120:0x01df, B:122:0x01e5, B:124:0x01f8, B:126:0x0208, B:129:0x020b), top: B:164:0x0161, outer: #3, inners: #0, #2 }] */
+    /* JADX WARN: Code duplicated, block: B:142:0x023f A[Catch: all -> 0x026c, TryCatch #1 {, blocks: (B:85:0x0161, B:87:0x016b, B:89:0x0171, B:93:0x0177, B:95:0x0189, B:97:0x0199, B:100:0x01a2, B:101:0x01a7, B:103:0x01ad, B:109:0x01c2, B:113:0x01c8, B:114:0x01ca, B:127:0x0209, B:133:0x020f, B:134:0x0210, B:135:0x0214, B:137:0x021a, B:139:0x022d, B:142:0x023f, B:143:0x0241, B:153:0x0269, B:154:0x026a, B:99:0x01a0, B:144:0x0242, B:146:0x024f, B:148:0x025f, B:149:0x0265, B:115:0x01cb, B:117:0x01d5, B:119:0x01db, B:120:0x01df, B:122:0x01e5, B:124:0x01f8, B:126:0x0208, B:129:0x020b), top: B:164:0x0161, outer: #3, inners: #0, #2 }] */
+    /* JADX WARN: Code duplicated, block: B:146:0x024f A[Catch: all -> 0x0267, TryCatch #0 {, blocks: (B:144:0x0242, B:146:0x024f, B:148:0x025f, B:149:0x0265), top: B:162:0x0242, outer: #1 }] */
+    /* JADX WARN: Code duplicated, block: B:148:0x025f A[Catch: all -> 0x0267, TryCatch #0 {, blocks: (B:144:0x0242, B:146:0x024f, B:148:0x025f, B:149:0x0265), top: B:162:0x0242, outer: #1 }] */
+    /* JADX WARN: Code duplicated, block: B:162:0x0242 A[EXC_TOP_SPLITTER, SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:183:0x023c A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:82:0x0149  */
+    private boolean isRedundantMessage(StatusBarNotification statusBarNotification, Notification notification, Bundle bundle, String str, String str2, String str3) {
+        String str4;
+        boolean z;
+        Iterator it;
+        Iterator<String> it2;
+        CharSequence[] charSequenceArray;
+        Bundle bundle2;
+        CharSequence charSequence;
+        if (statusBarNotification == null || statusBarNotification.getKey() == null) {
+            return false;
+        }
+        try {
+            ArrayList arrayList = new ArrayList();
+            if (bundle != null) {
+                Parcelable[] parcelableArray = bundle.getParcelableArray("android.messages");
+                if (parcelableArray != null) {
+                    for (int iMax = Math.max(0, parcelableArray.length - 25); iMax < parcelableArray.length; iMax++) {
+                        if ((parcelableArray[iMax] instanceof Bundle) && (charSequence = (bundle2 = (Bundle) parcelableArray[iMax]).getCharSequence(Settings.EXTRA_TEXT)) != null && charSequence.length() > 0) {
+                            CharSequence charSequence2 = bundle2.getCharSequence("sender");
+                            arrayList.add((charSequence2 == null ? "" : charSequence2.toString()) + "\u0001" + charSequence.toString());
+                        }
+                    }
+                }
+                if (arrayList.isEmpty() && (charSequenceArray = bundle.getCharSequenceArray("android.textLines")) != null) {
+                    for (int iMax2 = Math.max(0, charSequenceArray.length - 25); iMax2 < charSequenceArray.length; iMax2++) {
+                        if (charSequenceArray[iMax2] != null && charSequenceArray[iMax2].length() > 0) {
+                            arrayList.add(charSequenceArray[iMax2].toString());
+                        }
+                    }
+                }
+            }
+            if (arrayList.isEmpty()) {
+                String str5 = str2 == null ? "" : str2;
+                if (str3 == null) {
+                    str3 = "";
+                }
+                String str6 = str5 + "\u0001" + str3;
+                if (!str6.trim().isEmpty()) {
+                    arrayList.add(str6);
+                }
+            }
+            if (arrayList.isEmpty()) {
+                return false;
+            }
+            if (bundle != null) {
+                CharSequence charSequence3 = bundle.getCharSequence("android.conversationTitle");
+                String string = charSequence3 == null ? "" : charSequence3.toString();
+                if (string.isEmpty() && notification != null && notification.getShortcutId() != null) {
+                    string = notification.getShortcutId();
+                }
+                if (!string.isEmpty() || str2 == null || str2.isEmpty() || "微信".equals(str2) || "QQ".equals(str2) || str2.contains("条新消息") || str2.contains("新消息")) {
+                    str2 = string;
+                }
+                if (!str2.isEmpty()) {
+                    str4 = str + "\u0001" + str2;
+                } else {
+                    str4 = null;
+                }
+            } else {
+                str4 = null;
+            }
+            String str7 = (String) arrayList.get(arrayList.size() - 1);
+            String key = statusBarNotification.getKey();
+            long postTime = statusBarNotification.getPostTime();
+            synchronized (this.msgStates) {
+                MsgState msgState = this.msgStates.get(key);
+                if (msgState != null && postTime < msgState.postTime) {
+                    return true;
+                }
+                if (msgState == null) {
+                    msgState = new MsgState(postTime);
+                    this.msgStates.put(key, msgState);
+                    if (this.msgStates.size() > 256) {
+                        Iterator<String> it3 = this.msgStates.keySet().iterator();
+                        if (it3.hasNext()) {
+                            it3.next();
+                            it3.remove();
+                        }
+                    }
+                } else {
+                    msgState.postTime = postTime;
+                }
+                Iterator it4 = arrayList.iterator();
+                while (true) {
+                    if (!it4.hasNext()) {
+                        z = true;
+                        break;
+                    }
+                    if (!msgState.seen.contains((String) it4.next())) {
+                        z = false;
+                        break;
+                    }
+                }
+                if (z) {
+                    return true;
+                }
+                if (str4 != null) {
+                    synchronized (this.lastMsgByConversation) {
+                        String str8 = this.lastMsgByConversation.get(str4);
+                        if (str8 != null && str8.equals(str7)) {
+                            Iterator it5 = arrayList.iterator();
+                            while (it5.hasNext()) {
+                                msgState.seen.add((String) it5.next());
+                                if (msgState.seen.size() > 64) {
+                                    msgState.seen.remove(msgState.seen.iterator().next());
+                                }
+                            }
+                            return true;
+                        }
+                        it = arrayList.iterator();
+                        while (it.hasNext()) {
+                            msgState.seen.add((String) it.next());
+                            if (msgState.seen.size() > 64) {
+                                msgState.seen.remove(msgState.seen.iterator().next());
+                            }
+                        }
+                        if (str4 != null) {
+                            synchronized (this.lastMsgByConversation) {
+                                this.lastMsgByConversation.put(str4, str7);
+                                if (this.lastMsgByConversation.size() > 256) {
+                                    it2 = this.lastMsgByConversation.keySet().iterator();
+                                    if (it2.hasNext()) {
+                                        it2.next();
+                                        it2.remove();
+                                    }
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                }
+                it = arrayList.iterator();
+                while (it.hasNext()) {
+                    msgState.seen.add((String) it.next());
+                    if (msgState.seen.size() > 64) {
+                        msgState.seen.remove(msgState.seen.iterator().next());
+                    }
+                }
+                if (str4 != null) {
+                    synchronized (this.lastMsgByConversation) {
+                        this.lastMsgByConversation.put(str4, str7);
+                        if (this.lastMsgByConversation.size() > 256) {
+                            it2 = this.lastMsgByConversation.keySet().iterator();
+                            if (it2.hasNext()) {
+                                it2.next();
+                                it2.remove();
+                            }
+                        }
+                    }
+                }
+                return false;
+            }
+        } catch (Throwable th) {
+            return false;
+        }
+    }
+
     private static class RecentNotif {
         Bitmap icon;
         int iconAccent;
@@ -818,14 +867,16 @@ public class NotificationService extends NotificationListenerService {
         PendingIntent intent;
         String key;
         String pkg;
+        boolean isDownload;
+        boolean isDownloadDone;
+        int progress;
+        boolean progressIndeterminate;
+        int progressMax;
         PendingIntent replyIntent;
         String replyKey;
         String text;
         long time;
         String title;
-        int progress;
-        int progressMax;
-        boolean progressIndeterminate;
 
         private RecentNotif() {
         }
@@ -853,366 +904,381 @@ public class NotificationService extends NotificationListenerService {
     @Override // android.service.notification.NotificationListenerService
     public void onListenerConnected() {
         Log.i(Settings.TAG, "Notification listener connected.");
-        // fixed9: when the listener (re)connects, the system re-delivers every
-        // currently-active notification through onNotificationPosted. Seed the
-        // key cache with those keys first, so the re-delivery does not pop
-        // them all again — this is why duplicates came back "after a while"
-        // (the service gets killed and restarted, the cache was empty).
         try {
-            StatusBarNotification[] active = getActiveNotifications();
-            if (active != null) {
-                long now = SystemClock.uptimeMillis();
+            StatusBarNotification[] activeNotifications = getActiveNotifications();
+            if (activeNotifications != null) {
+                long jUptimeMillis = SystemClock.uptimeMillis();
                 synchronized (this.seenNotifKeys) {
-                    for (StatusBarNotification sbn : active) {
-                        if (sbn != null && sbn.getKey() != null) {
-                            this.seenNotifKeys.put(sbn.getKey(), Long.valueOf(now));
+                    for (StatusBarNotification statusBarNotification : activeNotifications) {
+                        if (statusBarNotification != null && statusBarNotification.getKey() != null) {
+                            this.seenNotifKeys.put(statusBarNotification.getKey(), Long.valueOf(jUptimeMillis));
                             try {
-                                Bundle b = sbn.getNotification() == null ? null : sbn.getNotification().extras;
-                                String t = getText(b, "android.title");
-                                String tx = getText(b, "android.text");
-                                if (tx == null || tx.isEmpty()) {
-                                    tx = getText(b, "android.bigText");
+                                Bundle bundle = statusBarNotification.getNotification() == null ? null : statusBarNotification.getNotification().extras;
+                                String text = getText(bundle, "android.title");
+                                String text2 = getText(bundle, "android.text");
+                                if (text2 == null || text2.isEmpty()) {
+                                    text2 = getText(bundle, "android.bigText");
                                 }
-                                // fixed133: seed the same progress-suffixed content
-                                // as isRepeatNotifKey, so a re-delivered progress
-                                // notification does not re-pop after reconnect.
-                                int seedProgress = b != null ? b.getInt("android.progress", 0) : 0;
-                                int seedProgressMax = b != null ? b.getInt("android.progressMax", 0) : 0;
-                                this.seenNotifKeyContent.put(sbn.getKey(), (t == null ? "" : t) + "\u0001" + (tx == null ? "" : tx) + "\u0001" + seedProgress + "/" + seedProgressMax);
-                            } catch (Throwable ignored) {
+                                int i = bundle != null ? bundle.getInt("android.progress", 0) : 0;
+                                int i2 = bundle != null ? bundle.getInt("android.progressMax", 0) : 0;
+                                Map<String, String> map = this.seenNotifKeyContent;
+                                String key = statusBarNotification.getKey();
+                                if (text == null) {
+                                    text = "";
+                                }
+                                if (text2 == null) {
+                                    text2 = "";
+                                }
+                                map.put(key, text + "\u0001" + text2 + "\u0001" + i + "/" + i2);
+                            } catch (Throwable th) {
                             }
                         }
                     }
                 }
-                Log.i(Settings.TAG, "Seeded " + active.length + " active notification keys.");
+                Log.i(Settings.TAG, "Seeded " + activeNotifications.length + " active notification keys.");
             }
-        } catch (Throwable th) {
-            Log.i(Settings.TAG, "Seed active keys failed", th);
+        } catch (Throwable th2) {
+            Log.i(Settings.TAG, "Seed active keys failed", th2);
         }
     }
 
+    // fixed188: code recognition for ALL notifications (user
+    // "取件码这个你确定是全部通知都可以识别"). The old call sat
+    // at the end of onNotificationPosted, after the music/call/
+    // ongoing branches, so music/call notifications and ongoing
+    // (non-delivery, non-progress) notifications were never
+    // scanned. Run it up front, for any notification with a
+    // title/text, before any branch returns — the scan only reads
+    // text, it does not depend on the notification popping a
+    // bubble. The late call is removed to avoid double scans.
+    private void tryExtractCodeEarly(StatusBarNotification sbn, Notification notification, Bundle bundle, SharedPreferences prefs) {
+        try {
+            String title = getText(bundle, "android.title");
+            String text = getText(bundle, "android.text");
+            if (text == null || text.isEmpty()) {
+                text = getText(bundle, "android.bigText");
+            }
+            if (text == null || text.isEmpty()) {
+                text = getLastTextLine(bundle);
+            }
+            if (text == null || text.isEmpty()) {
+                text = getLatestMessageText(bundle);
+            }
+            if ((text == null || text.isEmpty()) && notification != null && notification.tickerText != null && !notification.tickerText.toString().trim().isEmpty()) {
+                text = notification.tickerText.toString();
+            }
+            String text3 = (text == null || text.isEmpty()) ? getText(bundle, "android.subText") : text;
+            if ((title == null || title.isEmpty()) && (text3 == null || text3.isEmpty())) {
+                return;
+            }
+            final String key = sbn.getKey();
+            LocalCodeExtractor.extractCode(title, text3, prefs, new LocalCodeExtractor.Callback() {
+                @Override
+                public void onCodeFound(String kind, String code) {
+                    Intent intent = new Intent(Settings.ACTION_CODE);
+                    intent.setPackage(Settings.SYSTEMUI_PACKAGE);
+                    intent.putExtra(Settings.EXTRA_KEY, key);
+                    intent.putExtra(Settings.EXTRA_CODE_KIND, kind);
+                    intent.putExtra(Settings.EXTRA_CODE, code);
+                    NotificationService.this.sendBroadcast(intent);
+                    Log.i(Settings.TAG, "Local code found: " + kind);
+                }
+
+                @Override
+                public void onNoCode() {
+                }
+            });
+        } catch (Throwable th) {
+            Log.e(Settings.TAG, "LocalCodeExtractor.extractCode failed", th);
+        }
+    }
+
+    /* JADX WARN: Code duplicated, block: B:131:0x0251  */
     @Override // android.service.notification.NotificationListenerService
     public void onNotificationPosted(StatusBarNotification statusBarNotification) {
+        CharSequence charSequence;
+        int i;
+        int i2;
+        boolean z;
+        int i3;
         MediaSession.Token token;
         if (statusBarNotification == null) {
             return;
         }
         try {
-            if (statusBarNotification.getNotification() == null) {
-                return;
-            }
-            SharedPreferences sharedPreferences = getSharedPreferences(Settings.PREFS_NAME, 0);
-            if (!sharedPreferences.getBoolean(Settings.KEY_ENABLED, true)) {
-                return;
-            }
-            String packageName = statusBarNotification.getPackageName();
-            if (getPackageName().equals(packageName)) {
-                return;
-            }
-            Notification notification = statusBarNotification.getNotification();
-            Bundle bundle = notification.extras;
-            // fixed33: diagnostic logging (user will export the log for
-            // analysis). One line per posted notification so a double
-            // delivery shows up as two Posted lines for the same key.
-            FileLog.i("Posted pkg=" + packageName + " key=" + statusBarNotification.getKey() + " ongoing=" + isOngoing(notification) + " flags=" + notification.flags);
-            // fixed36: drop notifications posted by a vendor push service —
-            // the user wants only the app's own notifications (e.g. Meituan's
-            // delivery notice arrives as "推送服务" instead of "美团"; the app
-            // posts its own copy too, so dropping the push-service copy leaves
-            // one correct "美团" bubble and kills a double-pop source).
-            if (isPushService(packageName)) {
-                // fixed54: log the content too — BOSS直聘/鱼泡直聘的通知
-                // 疑似只剩推送服务这一份(应用本身在后台不发自己的
-                // 一份), 丢了就一条都收不到; 日志要能分清是哪种情况。
-                FileLog.i("Push service notification dropped: pkg=" + packageName + " title=" + getText(bundle, "android.title") + " text=" + getText(bundle, "android.text"));
-                return;
-            }
-            if (sharedPreferences.getBoolean(Settings.KEY_MUSIC_ENABLED, true)) {
-                if (bundle != null) {
-                    token = (MediaSession.Token) bundle.getParcelable("android.mediaSession");
-                } else {
-                    token = null;
-                }
-                if (token != null) {
-                    if (isVideoApp(packageName)) {
-                        // fixed6: video apps get no player card/capsule — the
-                        // notification itself is enough. Drop the media session
-                        // (do not attach, do not show the bubble); the app's own
-                        // system notification stays visible, it is not cancelled.
-                        Log.i(Settings.TAG, "Video app media session ignored, no player: " + packageName);
-                        return;
-                    }
-                    handleMediaNotification(statusBarNotification, notification, token);
+            if (statusBarNotification.getNotification() != null) {
+                SharedPreferences sharedPreferences = getSharedPreferences(Settings.PREFS_NAME, 0);
+                if (!sharedPreferences.getBoolean(Settings.KEY_ENABLED, true)) {
                     return;
                 }
-            }
-            // fixed31: delivery live bubble removed — Meituan/Eleme
-            // delivery notifications are ordinary notifications now.
-            // They fall through to the normal path below (see
-            // isDeliveryOrder): the first post shows as a normal capsule,
-            // later progress updates are dropped by the key cache like any
-            // other app's re-post. No more live-order step/progress bubble.
-            // (fixed32: the nav branch moved above the media branch.)
-            if (isCallNotification(statusBarNotification, notification)) {
-                if (sharedPreferences.getBoolean(Settings.KEY_CALL_ENABLED, true)) {
-                    handleCallNotification(statusBarNotification, notification, bundle);
+                String packageName = statusBarNotification.getPackageName();
+                if (getPackageName().equals(packageName)) {
                     return;
                 }
-                return;
-            }
-            // fixed31: delivery notifications are ordinary notifications.
-            // They are ongoing (FLAG_ONGOING_EVENT), which the normal path
-            // used to skip — exempt them so they show as a normal capsule
-            // like any other app's notification.
-            // fixed99: no live nav — Amap is an ordinary notification now.
-            // Its ongoing nav post is exempt from the ongoing skip, like
-            // Meituan/Eleme, so it still shows as a capsule.
-            boolean isDeliveryOrder = Settings.PKG_MEITUAN.equals(packageName) || Settings.PKG_ELEME.equals(packageName) || Settings.PKG_AMAP.equals(packageName);
-            // fixed133: download progress — a notification carrying progress
-            // (android.progress / android.progressMax / android.progressIndeterminate)
-            // is a download (or other long task) in progress. It is ongoing
-            // by definition, so exempt it from the ongoing skip like a
-            // delivery order; the bubble shows the progress bar.
-            int notifProgress = bundle != null ? bundle.getInt("android.progress", 0) : 0;
-            int notifProgressMax = bundle != null ? bundle.getInt("android.progressMax", 0) : 0;
-            boolean notifProgressIndeterminate = bundle != null && bundle.getBoolean("android.progressIndeterminate", false);
-            // fixed136: the extras are often stale at 0 while the live
-            // progress is in the RemoteViews ProgressBar. Take the
-            // highest percent across sources (progress only increases).
-            int[] rvProgress = readProgressFromRemoteViews(notification);
-            if (rvProgress != null) {
-                int rvPct = (rvProgress[0] * 100) / rvProgress[1];
-                int exPct = notifProgressMax > 0 ? (notifProgress * 100) / notifProgressMax : -1;
-                if (rvPct > exPct) {
-                    notifProgress = rvProgress[0];
-                    notifProgressMax = rvProgress[1];
-                }
-            }
-            boolean hasProgress = notifProgressMax > 0 || notifProgressIndeterminate;
-            // fixed55: this skip used to be silent — a BOSS直聘/鱼泡直聘
-            // notification sits in the shade but never bubbles, and the
-            // log showed nothing. Log it so the drop reason is visible.
-            if (isOngoing(notification) && !isDeliveryOrder && !hasProgress) {
-                FileLog.i("Notification skipped: ongoing, not delivery: " + packageName + " flags=" + notification.flags);
-            }
-            if ((!isOngoing(notification) || isDeliveryOrder || hasProgress) && !Settings.SYSTEMUI_PACKAGE.equals(packageName) && !"android".equals(packageName)) {
-                String text = getText(bundle, "android.title");
-                String text2 = getText(bundle, "android.text");
-                if (text2 == null || text2.isEmpty()) {
-                    text2 = getText(bundle, "android.bigText");
-                }
-                // fixed33: some apps keep their content outside
-                // android.text — WeChat MessagingStyle puts it in
-                // android.messages / android.textLines, Meituan delivery
-                // and custom-content notifications often leave text empty
-                // and draw everything in a RemoteViews. Without these
-                // fallbacks the expanded card renders as a header-only
-                // bar (screenshots 2081 WeChat / 2084 WeChat / 2088
-                // Meituan: icon + app name + time + close, no body).
-                if (text2 == null || text2.isEmpty()) {
-                    text2 = getLastTextLine(bundle);
-                }
-                if (text2 == null || text2.isEmpty()) {
-                    text2 = getLatestMessageText(bundle);
-                }
-                if (text2 == null || text2.isEmpty()) {
-                    CharSequence ticker = notification.tickerText;
-                    if (ticker != null && !ticker.toString().trim().isEmpty()) {
-                        text2 = ticker.toString();
+                Notification notification = statusBarNotification.getNotification();
+                Bundle bundle = notification.extras;
+                FileLog.i("Posted pkg=" + packageName + " key=" + statusBarNotification.getKey() + " ongoing=" + isOngoing(notification) + " flags=" + notification.flags);
+                if (isPushService(packageName)) {
+                    // fixed176: push-service delegation — the key's 2nd
+                    // field is the REAL app (e.g. com.hpbr.bosszhipin
+                    // for BOSS). Show the real app's icon/name instead
+                    // of dropping, like flymebobo 2.4 v328. Only drop
+                    // when the key carries no valid installed app.
+                    String realPkg = keyPackage(statusBarNotification.getKey());
+                    if (realPkg != null && !realPkg.isEmpty()
+                            && !realPkg.equals(packageName)
+                            && isInstalledApp(realPkg)) {
+                        FileLog.i("Push service delegated: pkg=" + packageName + " realPkg=" + realPkg + " key=" + statusBarNotification.getKey());
+                        packageName = realPkg;
+                    } else {
+                        FileLog.i("Push service notification dropped: pkg=" + packageName + " title=" + getText(bundle, "android.title") + " text=" + getText(bundle, "android.text"));
+                        return;
                     }
                 }
-                if (text2 == null || text2.isEmpty()) {
-                    text2 = getText(bundle, "android.subText");
-                }
-                // fixed55: empty title+text used to fall through silently
-                // too — log it, same BOSS/鱼泡直聘 diagnosis as above.
-                if ((text == null || text.isEmpty()) && (text2 == null || text2.isEmpty())) {
-                    FileLog.i("Notification dropped: empty title and text: " + packageName + " flags=" + notification.flags);
-                }
-                if ((text != null && !text.isEmpty()) || (text2 != null && !text2.isEmpty())) {
-                    // fixed136: refine progress from the text ("45%",
-                    // "12MB/50MB") — the text often carries the live
-                    // percent while the extras stay at 0. Highest wins.
-                    int textPct = parseProgressPercent(text2);
-                    if (textPct < 0) {
-                        textPct = parseProgressPercent(text);
+                // fixed188: scan for a code up front, before the
+                // music/call/ongoing branches return early.
+                tryExtractCodeEarly(statusBarNotification, notification, bundle, sharedPreferences);
+                if (sharedPreferences.getBoolean(Settings.KEY_MUSIC_ENABLED, true)) {
+                    if (bundle != null) {
+                        token = (MediaSession.Token) bundle.getParcelable("android.mediaSession");
+                    } else {
+                        token = null;
                     }
-                    if (textPct >= 0) {
-                        int curPct = notifProgressMax > 0 ? (notifProgress * 100) / notifProgressMax : -1;
-                        if (textPct > curPct) {
-                            if (notifProgressMax > 0) {
-                                notifProgress = (textPct * notifProgressMax) / 100;
-                            } else {
-                                notifProgressMax = 100;
-                                notifProgress = textPct;
-                            }
-                            hasProgress = true;
+                    if (token != null) {
+                        handleMediaNotification(statusBarNotification, notification, token);
+                        return;
+                    }
+                }
+                if (isCallNotification(statusBarNotification, notification)) {
+                    if (sharedPreferences.getBoolean(Settings.KEY_CALL_ENABLED, true)) {
+                        handleCallNotification(statusBarNotification, notification, bundle);
+                        return;
+                    }
+                    return;
+                }
+                boolean z2 = Settings.PKG_MEITUAN.equals(packageName) || Settings.PKG_ELEME.equals(packageName) || Settings.PKG_AMAP.equals(packageName);
+                int i4 = bundle != null ? bundle.getInt("android.progress", 0) : 0;
+                int i5 = bundle != null ? bundle.getInt("android.progressMax", 0) : 0;
+                boolean z3 = bundle != null && bundle.getBoolean("android.progressIndeterminate", false);
+                // fixed213: RemoteViews progress (fixed206 had it).
+                // The store's install progress often lives in the
+                // RemoteViews, not the extras — without this, z4 is
+                // false and an ongoing download is dropped before
+                // the download detection below ever runs.
+                int[] progressFromRemoteViews = readProgressFromRemoteViews(notification);
+                if (progressFromRemoteViews != null) {
+                    if ((progressFromRemoteViews[0] * 100) / progressFromRemoteViews[1] > (i5 > 0 ? (i4 * 100) / i5 : -1)) {
+                        i4 = progressFromRemoteViews[0];
+                        i5 = progressFromRemoteViews[1];
+                    }
+                }
+                boolean z4 = i5 > 0 || z3;
+                if (isOngoing(notification) && !z2 && !z4) {
+                    FileLog.i("Notification skipped: ongoing, not delivery: " + packageName + " flags=" + notification.flags);
+                }
+                if ((!isOngoing(notification) || z2 || z4) && !Settings.SYSTEMUI_PACKAGE.equals(packageName) && !"android".equals(packageName)) {
+                    String text = getText(bundle, "android.title");
+                    String text2 = getText(bundle, "android.text");
+                    if (text2 == null || text2.isEmpty()) {
+                        text2 = getText(bundle, "android.bigText");
+                    }
+                    if (text2 == null || text2.isEmpty()) {
+                        text2 = getLastTextLine(bundle);
+                    }
+                    if (text2 == null || text2.isEmpty()) {
+                        text2 = getLatestMessageText(bundle);
+                    }
+                    if ((text2 == null || text2.isEmpty()) && (charSequence = notification.tickerText) != null && !charSequence.toString().trim().isEmpty()) {
+                        text2 = charSequence.toString();
+                    }
+                    String text3 = (text2 == null || text2.isEmpty()) ? getText(bundle, "android.subText") : text2;
+                    if ((text == null || text.isEmpty()) && (text3 == null || text3.isEmpty())) {
+                        FileLog.i("Notification dropped: empty title and text: " + packageName + " flags=" + notification.flags);
+                    }
+                    if ((text != null && !text.isEmpty()) || (text3 != null && !text3.isEmpty())) {
+                        // fixed212: download detection (2.0 dual
+                        // condition, ported). A download is a regular
+                        // notification capsule whose title carries the
+                        // live percent; the notification is NOT
+                        // cancelled so it keeps re-posting and the
+                        // capsule refreshes in real time.
+                        i = i4;
+                        i2 = i5;
+                        z = z4;
+                        boolean isDownload = false;
+                        int downloadPct = -1;
+                        // fixed213: no `if (z)` gate — 2.0 calls
+                        // readDownloadPct unconditionally. The percent
+                        // can live in RemoteViews or text while the
+                        // extras carry no progress; gating on z made
+                        // fixed212 miss those downloads entirely.
+                        String channelId = null;
+                        try { channelId = notification.getChannelId(); } catch (Throwable ignored) { }
+                        String dlInfo = bundle != null ? getText(bundle, "android.infoText") : null;
+                        downloadPct = readDownloadPct(notification, text, text3, dlInfo);
+                        if (downloadPct >= 0 && hasDownloadSignal(packageName, channelId, text, text3)) {
+                            isDownload = true;
+                            // Force the progress flags from the percent
+                            // so the download passes the progress-based
+                            // exemptions (dedup / duplicate) below.
+                            z = true;
+                            i = downloadPct;
+                            i2 = 100;
                         }
-                    }
-                    // fixed28 (ported from Flyme Island 1.0.38-r3 V()): drop
-                    // stale notifications — postTime more than 5s ago means
-                    // the system re-delivered an old notification (e.g. after
-                    // the listener service reconnected). This is Flyme's STALE
-                    // check, as a single absolute window instead of a
-                    // per-key postTime comparison.
-                    // fixed136: a download lasts minutes — exempt progress
-                    // notifications, or every update after 5s is dropped.
-                    if (!hasProgress && System.currentTimeMillis() - statusBarNotification.getPostTime() > 5000) {
-                        FileLog.i("Stale notification dropped (>5s old): " + packageName);
-                        return;
-                    }
-                    // fixed28 (ported from Flyme Island 1.0.38-r3 V()): flags
-                    // mask 578 = 0x242 = FLAG_ONGOING_EVENT (0x2) |
-                    // FLAG_FOREGROUND_SERVICE (0x40) | FLAG_GROUP_SUMMARY
-                    // (0x200). Ongoing/foreground-service notifications are
-                    // not user messages, and a group summary is redundant
-                    // once its children are shown — both are classic
-                    // double-pop sources (message + its summary).
-                    // fixed31: delivery notifications are ordinary now, so
-                    // exempt them from the ongoing bit only (mask 576 =
-                    // 0x240: foreground-service | group-summary still drop).
-                    // fixed135: progress notifications are ongoing by
-                    // definition — exempt them from the ongoing bit of
-                    // the flags mask (576, like a delivery order), or
-                    // every progress update is dropped here and the
-                    // bubble stays at the first 0% state.
-                    // fixed137: app-store downloads run as a foreground
-                    // service, so the download notification carries
-                    // FLAG_FOREGROUND_SERVICE (0x40). 576 still includes
-                    // that bit, so the main path kept dropping these and
-                    // only the fallback delivered the first 0% state.
-                    // For progress notifications the mask is 512
-                    // (GROUP_SUMMARY only) — ongoing and foreground-
-                    // service are both exempt; a group summary is still
-                    // dropped (redundant once its children are shown).
-                    int dropMask = hasProgress ? 512 : (isDeliveryOrder ? 576 : 578);
-                    if ((notification.flags & dropMask) != 0) {
-                        FileLog.i("Notification dropped by flags mask " + dropMask + ": " + packageName);
-                        return;
-                    }
-                    // fixed28 (ported from Flyme Island 1.0.38-r3 W()):
-                    // per-package fingerprint gate. Identical id:postTime:
-                    // title/text means the exact same notification was
-                    // re-delivered — drop with zero action.
-                    if (isRepeatNotifFingerprint(packageName, statusBarNotification, text, text2, notifProgress, notifProgressMax)) {
-                        FileLog.i("Repeat notification fingerprint dropped: " + packageName);
-                        return;
-                    }
-                    if (isRepeatNotifKey(statusBarNotification.getKey(), text, text2, notifProgress, notifProgressMax)) {
-                        FileLog.i("Repeat notification key dropped: " + statusBarNotification.getKey());
-                        return;
-                    }
-                    if (isRedundantMessage(statusBarNotification, notification, bundle, packageName, text, text2)) {
-                        FileLog.i("Redundant message dropped (already seen): " + packageName);
-                        return;
-                    }
-                    // fixed135: a progress update has the same title/text
-                    // as the last one, so isDuplicateNotif would drop it
-                    // as a duplicate within its 15s window. Skip it for
-                    // progress notifications — isRepeatNotifKey is already
-                    // progress-aware and still catches exact duplicates.
-                    if (!hasProgress && isDuplicateNotif(packageName, text, text2)) {
-                        FileLog.i("Duplicate notification dropped: " + packageName);
-                        return;
-                    }
-                    if (isRedundantGroupSummary(notification, packageName)) {
-                        FileLog.i("Group summary dropped (child already shown): " + packageName);
-                        return;
-                    }
-                    noteNotifGroup(notification, packageName);
-                    RecentNotif recentNotif = new RecentNotif();
-                    recentNotif.key = statusBarNotification.getKey();
-                    recentNotif.title = text;
-                    recentNotif.text = text2;
-                    recentNotif.pkg = packageName;
-                    recentNotif.intent = notification.contentIntent;
-                    recentNotif.time = statusBarNotification.getPostTime();
-                    recentNotif.progress = notifProgress;
-                    recentNotif.progressMax = notifProgressMax;
-                    recentNotif.progressIndeterminate = notifProgressIndeterminate;
-                    if (notification.actions != null) {
-                        for (Notification.Action action : notification.actions) {
-                            if (action != null && action.actionIntent != null && action.getRemoteInputs() != null && action.getRemoteInputs().length > 0) {
-                                recentNotif.replyIntent = action.actionIntent;
-                                recentNotif.replyKey = action.getRemoteInputs()[0].getResultKey();
-                                break;
+                        // fixed219: completion — pct hit 100, or the
+                        // app rewrote the notification as done.
+                        boolean downloadDone = isDownload
+                                && (downloadPct >= 100
+                                        || isDownloadComplete(text, text3));
+                        if (downloadDone) {
+                            text = (text != null && text.contains("安装")) ? "安装完成" : "下载完成";
+                            try {
+                                sendLogLine("dlDone pkg=" + packageName
+                                        + " title=" + text + " pct=" + downloadPct);
+                            } catch (Throwable ignored) {
                             }
                         }
-                    }
-                    IconResult iconResultExtractIcon = extractIcon(notification, packageName);
-                    if (iconResultExtractIcon != null && iconResultExtractIcon.bitmap != null) {
-                        recentNotif.icon = scaleBitmap(iconResultExtractIcon.bitmap, 96);
-                        recentNotif.iconSmall = iconResultExtractIcon.small;
-                        recentNotif.iconAccent = iconResultExtractIcon.accent;
-                    }
-                    synchronized (this.recentNotifs) {
-                        for (int size = this.recentNotifs.size() - 1; size >= 0; size--) {
-                            if (statusBarNotification.getKey() != null && statusBarNotification.getKey().equals(this.recentNotifs.get(size).key)) {
-                                this.recentNotifs.remove(size);
+                        if (isDownload && !downloadDone) {
+                            // Strip a trailing percent the store may
+                            // already carry ("正在安装 18%") so it is
+                            // not repeated, then append the live one.
+                            String base = text == null ? "" : text.replaceAll("\\s+[0-9]+%$", "").trim();
+                            if (base.isEmpty()) {
+                                base = text3 == null ? "" : text3.replaceAll("\\s+[0-9]+%$", "").trim();
+                            }
+                            if (!base.isEmpty()) {
+                                text = base + " " + downloadPct + "%";
                             }
                         }
-                        this.recentNotifs.add(0, recentNotif);
-                        // fixed33: log every accepted notification — a
-                        // double delivery shows up as two Added lines for
-                        // the same key (service side), while a single
-                        // Added line plus two POP lines in the bubble
-                        // points at the display side instead.
-                        FileLog.i("Added notif key=" + recentNotif.key + " pkg=" + packageName + " title=" + recentNotif.title + " text=" + recentNotif.text);
-                        while (this.recentNotifs.size() > 8) {
-                            RecentNotif recentNotifRemove = this.recentNotifs.remove(this.recentNotifs.size() - 1);
-                            if (recentNotifRemove != null && recentNotifRemove.key != null) {
-                                synchronized (this.selfCancelledKeys) {
-                                    this.selfCancelledKeys.remove(recentNotifRemove.key);
+                        // fixed215: download detection diagnostic, forwarded
+                        // to SystemUI's log (the listener's own file is
+                        // not readable). Logged for any post from a
+                        // downloader pkg or with a percent, so a missed
+                        // download shows its inputs and the verdict.
+                        try {
+                            if (isDownload || downloadPct >= 0 || isDownloaderPkg(packageName)) {
+                                sendLogLine("dlDetect pkg=" + packageName
+                                        + " title=" + text + " text=" + text3
+                                        + " pct=" + downloadPct
+                                        + " signal=" + hasDownloadSignal(packageName, channelId, text, text3)
+                                        + " isDownload=" + isDownload);
+                            }
+                        } catch (Throwable ignored) {
+                        }
+                        if (!z && System.currentTimeMillis() - statusBarNotification.getPostTime() > 5000) {
+                            FileLog.i("Stale notification dropped (>5s old): " + packageName);
+                            return;
+                        }
+                        int i6 = z ? 512 : z2 ? 576 : 578;
+                        if ((notification.flags & i6) != 0) {
+                            FileLog.i("Notification dropped by flags mask " + i6 + ": " + packageName);
+                            return;
+                        }
+                        int i7 = i2;
+                        boolean z5 = z3;
+                        if (isRepeatNotifFingerprint(packageName, statusBarNotification, text, text3, i, i7)) {
+                            FileLog.i("Repeat notification fingerprint dropped: " + packageName);
+                            return;
+                        }
+                        if (isRepeatNotifKey(statusBarNotification.getKey(), text, text3, i, i7)) {
+                            FileLog.i("Repeat notification key dropped: " + statusBarNotification.getKey());
+                            return;
+                        }
+                        // fixed197: downloads skip the redundant-message
+                        // filter (same exemption as isDuplicateNotif
+                        // below). It drops a re-post whose title+text
+                        // were already seen and never looks at
+                        // progress — so a download's progress updates
+                        // (same title/text, only progress changed)
+                        // were all dropped here, the RecentNotif kept
+                        // progressMax=0, and the tick never tracked
+                        // it. That is the "still 0%".
+                        if (!z && isRedundantMessage(statusBarNotification, notification, bundle, packageName, text, text3)) {
+                            FileLog.i("Redundant message dropped (already seen): " + packageName);
+                            return;
+                        }
+                        if (!z && isDuplicateNotif(packageName, text, text3)) {
+                            FileLog.i("Duplicate notification dropped: " + packageName);
+                            return;
+                        }
+                        if (isRedundantGroupSummary(notification, packageName)) {
+                            FileLog.i("Group summary dropped (child already shown): " + packageName);
+                            return;
+                        }
+                        noteNotifGroup(notification, packageName);
+                        RecentNotif recentNotif = new RecentNotif();
+                        recentNotif.key = statusBarNotification.getKey();
+                        recentNotif.isDownload = isDownload;
+                        recentNotif.isDownloadDone = downloadDone;
+                        recentNotif.title = text;
+                        recentNotif.text = text3;
+                        recentNotif.pkg = packageName;
+                        recentNotif.intent = notification.contentIntent;
+                        recentNotif.time = statusBarNotification.getPostTime();
+                        recentNotif.progress = i;
+                        recentNotif.progressMax = i7;
+                        recentNotif.progressIndeterminate = z5;
+                        if (notification.actions != null) {
+                            for (Notification.Action action : notification.actions) {
+                                if (action != null && action.actionIntent != null && action.getRemoteInputs() != null && action.getRemoteInputs().length > 0) {
+                                    recentNotif.replyIntent = action.actionIntent;
+                                    recentNotif.replyKey = action.getRemoteInputs()[0].getResultKey();
+                                    break;
                                 }
                             }
                         }
-                    }
-                    if (statusBarNotification.getKey() != null) {
-                        try {
-                            synchronized (this.selfCancelledKeys) {
-                                this.selfCancelledKeys.add(statusBarNotification.getKey());
-                            }
-                            cancelNotification(statusBarNotification.getKey());
-                        } catch (Throwable th) {
-                            Log.e(Settings.TAG, "cancelNotification failed", th);
+                        IconResult iconResultExtractIcon = extractIcon(notification, packageName);
+                        if (iconResultExtractIcon != null && iconResultExtractIcon.bitmap != null) {
+                            recentNotif.icon = scaleBitmap(iconResultExtractIcon.bitmap, 96);
+                            recentNotif.iconSmall = iconResultExtractIcon.small;
+                            recentNotif.iconAccent = iconResultExtractIcon.accent;
                         }
-                    }
-                    broadcastNotifyList();
-                    // fixed140: start the download tick while a
-                    // download is in progress (polls live progress
-                    // like the player tick polls the MediaSession).
-                    scheduleDownloadTick();
-                    Log.i(Settings.TAG, "Notification posted: " + packageName);
-                    // fixed71: local code recognition — the old AiClient
-                    // sent the notification to a remote AI endpoint; the
-                    // user asked to drop the AI call and recognise
-                    // locally instead. No key, no network, no switch:
-                    // every notification is scanned on-device.
-                    final String key = statusBarNotification.getKey();
-                    try {
-                        LocalCodeExtractor.extractCode(text, text2, sharedPreferences, new LocalCodeExtractor.Callback() {
-                            @Override
-                            public void onCodeFound(String str, String str2) {
-                                Intent intent = new Intent(Settings.ACTION_CODE);
-                                intent.setPackage(Settings.SYSTEMUI_PACKAGE);
-                                intent.putExtra(Settings.EXTRA_KEY, key);
-                                intent.putExtra(Settings.EXTRA_CODE_KIND, str);
-                                intent.putExtra(Settings.EXTRA_CODE, str2);
-                                NotificationService.this.sendBroadcast(intent);
-                                Log.i(Settings.TAG, "Local code found: " + str);
+                        synchronized (this.recentNotifs) {
+                            try {
+                                for (int size = this.recentNotifs.size() - 1; size >= 0; size--) {
+                                    if (statusBarNotification.getKey() != null && statusBarNotification.getKey().equals(this.recentNotifs.get(size).key)) {
+                                        this.recentNotifs.remove(size);
+                                    }
+                                }
+                                this.recentNotifs.add(0, recentNotif);
+                                FileLog.i("Added notif key=" + recentNotif.key + " pkg=" + packageName + " title=" + recentNotif.title + " text=" + recentNotif.text);
+                                while (this.recentNotifs.size() > 8) {
+                                    RecentNotif recentNotifRemove = this.recentNotifs.remove(this.recentNotifs.size() - 1);
+                                    if (recentNotifRemove != null && recentNotifRemove.key != null) {
+                                        synchronized (this.selfCancelledKeys) {
+                                            this.selfCancelledKeys.remove(recentNotifRemove.key);
+                                        }
+                                    }
+                                }
+                            } catch (Throwable th) {
+                                throw th;
                             }
-
-                            @Override
-                            public void onNoCode() {
+                        }
+                        // fixed212: do NOT cancel a download — it must
+                        // stay alive so it keeps re-posting and the
+                        // capsule refreshes its percent in real time.
+                        // (fixed202 root cause: cancelling killed the
+                        // re-posts, so the capsule stuck at 0%.)
+                        if (!isDownload && statusBarNotification.getKey() != null) {
+                            try {
+                                synchronized (this.selfCancelledKeys) {
+                                    this.selfCancelledKeys.add(statusBarNotification.getKey());
+                                }
+                                cancelNotification(statusBarNotification.getKey());
+                            } catch (Throwable th2) {
+                                Log.e(Settings.TAG, "cancelNotification failed", th2);
                             }
-                        });
-                    } catch (Throwable th2) {
-                        Log.e(Settings.TAG, "LocalCodeExtractor.extractCode failed", th2);
+                        }
+                        // Download deleted (2026-11-23): no post-time
+                        // download setup, no tick. Downloads are
+                        // regular notifications now.
+                        broadcastNotifyList();
+                        Log.i(Settings.TAG, "Notification posted: " + packageName);
                     }
                 }
             }
-        } catch (Throwable th3) {
-            Log.e(Settings.TAG, "Error in onNotificationPosted", th3);
+        } catch (Throwable th4) {
+            Log.e(Settings.TAG, "Error in onNotificationPosted", th4);
         }
     }
 
@@ -1220,12 +1286,11 @@ public class NotificationService extends NotificationListenerService {
     public void onNotificationRemoved(StatusBarNotification statusBarNotification) {
         boolean zContains;
         boolean z;
-        boolean z2;
-        boolean z3;
         boolean zContains2;
+        boolean zContains3;
         StatusBarNotification[] activeNotifications = null;
         if (statusBarNotification == null) {
-            z2 = false;
+            z = false;
         } else {
             try {
                 if (statusBarNotification.getKey() == null) {
@@ -1239,31 +1304,25 @@ public class NotificationService extends NotificationListenerService {
                     z = false;
                 } else {
                     synchronized (this.recentNotifs) {
-                        z3 = false;
+                        z = false;
                         for (int size = this.recentNotifs.size() - 1; size >= 0; size--) {
                             if (statusBarNotification.getKey() != null && statusBarNotification.getKey().equals(this.recentNotifs.get(size).key)) {
                                 this.recentNotifs.remove(size);
-                                z3 = true;
+                                z = true;
                             }
                         }
                     }
-                    z = z3;
                 }
                 if (statusBarNotification.getKey() != null && statusBarNotification.getKey().equals(this.currentMediaKey)) {
                     releaseMediaController();
-                    // fixed31: delayed inactive (see sendMusicInactiveDelayed).
                     sendMusicInactiveDelayed(statusBarNotification.getPackageName());
                     Log.i(Settings.TAG, "Media notification removed, music inactive.");
                 }
                 if (statusBarNotification.getKey() != null && statusBarNotification.getKey().equals(this.callKey)) {
-                    // fixed90: if we cancelled this notification ourselves
-                    // (hide system prompt), the call is still ringing —
-                    // the bubble hides on the real end via PhoneStateListener.
-                    boolean selfCancelled = false;
                     synchronized (this.selfCancelledKeys) {
-                        selfCancelled = this.selfCancelledKeys.contains(statusBarNotification.getKey());
+                        zContains2 = this.selfCancelledKeys.contains(statusBarNotification.getKey());
                     }
-                    if (!selfCancelled) {
+                    if (!zContains2) {
                         this.callKey = null;
                         sendCallBroadcast(Settings.CALL_IDLE, null, null);
                         Log.i(Settings.TAG, "Call notification removed, call idle.");
@@ -1271,7 +1330,6 @@ public class NotificationService extends NotificationListenerService {
                         Log.i(Settings.TAG, "Call notification removed (self-cancel, call still active).");
                     }
                 }
-                z2 = z;
             } catch (Throwable th) {
                 Log.e(Settings.TAG, "Error in onNotificationRemoved", th);
                 return;
@@ -1286,27 +1344,27 @@ public class NotificationService extends NotificationListenerService {
                 for (int size2 = this.recentNotifs.size() - 1; size2 >= 0; size2--) {
                     String str = this.recentNotifs.get(size2).key;
                     if (str == null) {
-                        zContains2 = false;
+                        zContains3 = false;
                     } else {
                         synchronized (this.selfCancelledKeys) {
-                            zContains2 = this.selfCancelledKeys.contains(str);
+                            zContains3 = this.selfCancelledKeys.contains(str);
                         }
                     }
-                    if (!zContains2) {
+                    if (!zContains3) {
                         this.recentNotifs.remove(size2);
-                        z2 = true;
+                        z = true;
                     }
                 }
             }
         }
-        if (z2) {
+        if (z) {
             broadcastNotifyList();
             Log.i(Settings.TAG, "Notify list updated after removal.");
         }
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
     public void broadcastNotifyList() {
+        String string;
         ArrayList<Parcelable> arrayList = new ArrayList<>();
         synchronized (this.recentNotifs) {
             for (RecentNotif recentNotif : this.recentNotifs) {
@@ -1315,6 +1373,12 @@ public class NotificationService extends NotificationListenerService {
                 bundle.putString(Settings.ITEM_TITLE, recentNotif.title);
                 bundle.putString(Settings.ITEM_TEXT, recentNotif.text);
                 bundle.putString(Settings.ITEM_PACKAGE, recentNotif.pkg);
+                if (recentNotif.isDownload) {
+                    bundle.putBoolean(Settings.ITEM_IS_DOWNLOAD, true);
+                }
+                if (recentNotif.isDownloadDone) {
+                    bundle.putBoolean(Settings.ITEM_DOWNLOAD_DONE, true);
+                }
                 bundle.putLong(Settings.ITEM_TIME, recentNotif.time);
                 if (recentNotif.progressMax > 0 || recentNotif.progressIndeterminate) {
                     bundle.putInt(Settings.ITEM_PROGRESS, recentNotif.progress);
@@ -1338,21 +1402,16 @@ public class NotificationService extends NotificationListenerService {
                 arrayList.add(bundle);
             }
         }
-        // fixed33: log each broadcast so a double broadcast of the same
-        // list (two identical Broadcast lines) is visible in logcat.
-        StringBuilder keys = new StringBuilder();
-        for (android.os.Parcelable p : arrayList) {
-            if (p instanceof Bundle) {
-                String k = ((Bundle) p).getString(Settings.ITEM_KEY);
-                if (k != null) {
-                    if (keys.length() > 0) {
-                        keys.append(',');
-                    }
-                    keys.append(k);
+        StringBuilder sb = new StringBuilder();
+        for (Parcelable parcelable : arrayList) {
+            if ((parcelable instanceof Bundle) && (string = ((Bundle) parcelable).getString(Settings.ITEM_KEY)) != null) {
+                if (sb.length() > 0) {
+                    sb.append(',');
                 }
+                sb.append(string);
             }
         }
-        FileLog.i("Broadcast notify list: " + arrayList.size() + " items keys=" + keys);
+        FileLog.i("Broadcast notify list: " + arrayList.size() + " items keys=" + String.valueOf(sb));
         Intent intent = new Intent(Settings.ACTION_NOTIFY_LIST);
         intent.setPackage(Settings.SYSTEMUI_PACKAGE);
         intent.putParcelableArrayListExtra(Settings.EXTRA_NOTIFY_LIST, arrayList);
@@ -1360,37 +1419,26 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private boolean isCallNotification(StatusBarNotification statusBarNotification, Notification notification) {
-        String packageName;
         if ("call".equals(notification.category)) {
             return true;
         }
         if (notification.fullScreenIntent != null) {
-            if ((packageName = statusBarNotification.getPackageName()) != null) {
+            String packageName = statusBarNotification.getPackageName();
+            if (packageName != null) {
                 String lowerCase = packageName.toLowerCase();
-                // fixed91: "通话控制" (Flyme call control) posts the
-                // incoming-call heads-up from a package that contains
-                // none of dialer/phone/telecom — e.g. com.android.incallui
-                // itself. Match incallui/call too.
                 if (lowerCase.contains("dialer") || lowerCase.contains("phone") || lowerCase.contains("telecom") || lowerCase.contains("incallui") || lowerCase.contains("call")) {
                     return true;
                 }
             }
-            // fixed91: fallback — a full-screen-intent notification whose
-            // title looks like a phone number (or a contact name with a
-            // call word) is an incoming call, whatever package posted it.
             try {
-                Bundle b = notification.extras;
-                String title = b != null ? getText(b, "android.title") : null;
-                if (title != null) {
-                    String digits = title.replaceAll("[^0-9]", "");
-                    if (digits.length() >= 7) {
-                        return true;
-                    }
-                    if (title.contains("来电") || title.contains("呼入") || title.contains("正在呼叫")) {
-                        return true;
-                    }
+                Bundle bundle = notification.extras;
+                String text = bundle != null ? getText(bundle, "android.title") : null;
+                if (text != null) {
+                    return text.replaceAll("[^0-9]", "").length() >= 7 || text.contains("来电") || text.contains("呼入") || text.contains("正在呼叫");
                 }
-            } catch (Throwable ignored) {
+                return false;
+            } catch (Throwable th) {
+                return false;
             }
         }
         return false;
@@ -1402,27 +1450,142 @@ public class NotificationService extends NotificationListenerService {
         this.callKey = statusBarNotification.getKey();
         sendCallBroadcast(Settings.CALL_RINGING, text, text2);
         Log.i(Settings.TAG, "Call ringing from " + statusBarNotification.getPackageName());
-        // fixed90: "隐藏系统通话提示" — the system incoming-call heads-up
-        // banner is a notification, and the InCallUiHide hooks only block
-        // the fullscreen activity, not the banner. Cancel the system
-        // notification here so only our call bubble shows. The bubble
-        // hides on call end via its PhoneStateListener (IDLE), not via
-        // this notification, so cancelling it is safe.
+        // fixed177: do NOT cancel the call notification any more
+        // (2.0 way). Its actions — answer / hangup / speaker — must
+        // stay live so fireCallAction can fire them. The system
+        // banner / fullscreen UI is suppressed by the
+        // CallBannerSuppress + InCallUiHide hooks instead.
+    }
+
+    // fixed177: 2.0 speaker switching — fire the incallui call
+    // notification's OWN action via actionIntent.send(). No
+    // setSpeakerphoneOn, no direct AudioManager/TelecomManager
+    // calls. The notification carries ONE speaker action (a toggle,
+    // "打开扬声器" / "关闭扬声器"), so a speaker command fires
+    // whichever speaker action exists. Two passes: first match the
+    // stored call key, then package-only (the key goes stale when
+    // the notification refreshes after answering).
+    // fixed179: 2.0 speaker switching, verbatim (v125/v138/
+    // v141). Fire the incallui notification's OWN action via
+    // actionIntent.send(). The notification carries ONE speaker
+    // action (a toggle); a speaker command fires whichever
+    // speaker action exists (kind 3 or 4) — one tap = one toggle.
+    // No setSpeakerphoneOn, no direct AudioManager/TelecomManager.
+    // Two passes: first match the stored call key, then
+    // package-only (the key goes stale when the notification
+    // refreshes after answering). Also require the action's
+    // PendingIntent to be created by incallui (2.0).
+    private void fireCallAction(String command) {
+        if (command == null) {
+            return;
+        }
+        int want = classifyCallAction(command);
+        if (want < 0) {
+            return;
+        }
+        if (fireCallActionPass(want, this.callKey, true)) {
+            return;
+        }
+        fireCallActionPass(want, this.callKey, false);
+    }
+
+    private boolean fireCallActionPass(int want, String key,
+            boolean matchKey) {
         try {
-            SharedPreferences hidePrefs = getSharedPreferences(Settings.PREFS_NAME, 0);
-            if (hidePrefs != null && hidePrefs.getBoolean(Settings.KEY_HIDE_CALL_UI, true)) {
-                String key = statusBarNotification.getKey();
-                if (key != null) {
-                    synchronized (this.selfCancelledKeys) {
-                        this.selfCancelledKeys.add(key);
+            StatusBarNotification[] act = getActiveNotifications();
+            if (act == null) {
+                return false;
+            }
+            for (StatusBarNotification sbn : act) {
+                if (sbn == null
+                        || !"com.android.incallui".equals(
+                                sbn.getPackageName())) {
+                    continue;
+                }
+                if (matchKey && key != null && !key.isEmpty()
+                        && !key.equals(sbn.getKey())) {
+                    continue;
+                }
+                Notification n = sbn.getNotification();
+                if (n == null || n.actions == null) {
+                    continue;
+                }
+                for (Notification.Action a : n.actions) {
+                    if (a == null || a.actionIntent == null
+                            || a.title == null) {
+                        continue;
                     }
-                    cancelNotification(key);
-                    Log.i(Settings.TAG, "Call notification cancelled (hide system prompt).");
+                    int kind = classifyCallAction(a.title.toString());
+                    // 2.0 v138: a speaker command fires whichever
+                    // speaker action exists — it toggles.
+                    boolean speakerCmd = want == 3 || want == 4;
+                    boolean speakerAct = kind == 3 || kind == 4;
+                    if (speakerCmd ? !speakerAct : kind != want) {
+                        continue;
+                    }
+                    try {
+                        if (!"com.android.incallui".equals(
+                                a.actionIntent.getCreatorPackage())) {
+                            continue;
+                        }
+                    } catch (Throwable ignored) {
+                        continue;
+                    }
+                    try {
+                        a.actionIntent.send();
+                        FileLog.i("fireCallAction fired kind=" + kind
+                                + " title=" + a.title + " key=" + sbn.getKey());
+                        return true;
+                    } catch (Throwable t) {
+                        FileLog.i("fireCallAction send threw: " + t);
+                        return false;
+                    }
                 }
             }
-        } catch (Throwable th) {
-            Log.e(Settings.TAG, "cancel call notification failed", th);
+        } catch (Throwable t) {
+            FileLog.i("fireCallAction threw: " + t);
         }
+        return false;
+    }
+
+    // fixed179: 2.0's classifier, verbatim (v125, Flyme Island
+    // CallActionPolicy.classify, same titles): 0 answer, 1 reject,
+    // 2 hangup, 3 speaker on, 4 speaker off, 5 silence. Exact
+    // equals for answer/reject/hangup (lowercase); the speaker
+    // button shows an icon, not text, so its real title is often
+    // just "扬声器" / "speaker" / "免提" (a single toggle) — match
+    // by CONTAINS (v130). No kind 6: 2.0 has no speaker-answer
+    // action, and the 扬声器接听 button is removed (fixed179).
+    private int classifyCallAction(String title) {
+        if (title == null) {
+            return -1;
+        }
+        String t = title.trim().toLowerCase(java.util.Locale.ROOT);
+        if (t.equals("接听") || t.equals("接聽")
+                || t.equals("answer") || t.equals("accept")) {
+            return 0;
+        }
+        if (t.equals("拒接") || t.equals("拒绝") || t.equals("拒絕")
+                || t.equals("decline") || t.equals("reject")) {
+            return 1;
+        }
+        if (t.equals("挂断") || t.equals("掛斷")
+                || t.equals("hang up")) {
+            return 2;
+        }
+        if (t.contains("扬声器") || t.contains("揚聲器")
+                || t.contains("speaker") || t.contains("免提")) {
+            if (t.contains("关") || t.contains("關")
+                    || t.contains("off")) {
+                return 4;
+            }
+            return 3;
+        }
+        if (t.equals("静音") || t.equals("靜音")
+                || t.equals("silence")) {
+            return 5;
+        }
+        return -1;
     }
 
     private void sendCallBroadcast(String str, String str2, String str3) {
@@ -1435,50 +1598,41 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private void handleMediaNotification(StatusBarNotification statusBarNotification, Notification notification, MediaSession.Token token) {
-        // fixed31: a replacement media notification cancels any pending
-        // delayed "music inactive" from the old notification's removal.
+        String strTrim;
+        CharSequence charSequence;
+        CharSequence charSequence2;
         cancelPendingMusicInactive();
         String key = statusBarNotification.getKey();
         if (key != null && key.equals(this.currentMediaKey) && this.mediaController != null) {
-            // fixed31: lyrics are back to the original notification
-            // source. Same notification key = same song: only fill lyric
-            // slots that have a value, so a lyric-less re-post does not
-            // wipe the lyric we already have.
             updateLyricCandidates(notification, true);
             try {
-                if (notification.extras != null) {
-                    CharSequence t = notification.extras.getCharSequence("android.title");
-                    if (t != null && !t.toString().trim().isEmpty()) {
-                        this.currentNotifTitle = t.toString().trim();
-                    }
+                if (notification.extras != null && (charSequence2 = notification.extras.getCharSequence("android.title")) != null && !charSequence2.toString().trim().isEmpty()) {
+                    this.currentNotifTitle = charSequence2.toString().trim();
                 }
-            } catch (Throwable ignored) {
+            } catch (Throwable th) {
             }
             sendMusicStateFromController(statusBarNotification.getPackageName(), notification.contentIntent);
             return;
         }
-        String notifTitle = null;
         try {
-            if (notification.extras != null) {
-                CharSequence t = notification.extras.getCharSequence("android.title");
-                if (t != null) {
-                    notifTitle = t.toString().trim();
-                }
+            if (notification.extras != null && (charSequence = notification.extras.getCharSequence("android.title")) != null) {
+                strTrim = charSequence.toString().trim();
+            } else {
+                strTrim = null;
             }
-        } catch (Throwable th) {
+        } catch (Throwable th2) {
+            strTrim = null;
         }
-        if (notifTitle != null && !notifTitle.isEmpty()) {
-            this.currentNotifTitle = notifTitle;
+        if (strTrim != null && !strTrim.isEmpty()) {
+            this.currentNotifTitle = strTrim;
         }
-        // fixed31: lyrics are back to the original notification source
-        // (new notification key = new song: reset the lyric candidates).
         updateLyricCandidates(notification, false);
         releaseMediaController();
         try {
             final String packageName = statusBarNotification.getPackageName();
             final PendingIntent pendingIntent = notification.contentIntent;
             MediaController mediaController = new MediaController(this, token);
-            this.mediaCallback = new MediaController.Callback() { // from class: com.jarvis.bubblenotify.NotificationService.3
+            this.mediaCallback = new MediaController.Callback() { // from class: com.jarvis.bubblenotify.NotificationService.5
                 @Override // android.media.session.MediaController.Callback
                 public void onMetadataChanged(MediaMetadata mediaMetadata) {
                     NotificationService.this.sendMusicStateFromController(packageName, pendingIntent);
@@ -1492,8 +1646,6 @@ public class NotificationService extends NotificationListenerService {
                 @Override // android.media.session.MediaController.Callback
                 public void onSessionDestroyed() {
                     NotificationService.this.releaseMediaController();
-                    // fixed31: delayed inactive — a destroyed session is
-                    // often just the app re-posting with a new session.
                     NotificationService.this.sendMusicInactiveDelayed(packageName);
                     Log.i(Settings.TAG, "Media session destroyed, music inactive.");
                 }
@@ -1501,111 +1653,176 @@ public class NotificationService extends NotificationListenerService {
             mediaController.registerCallback(this.mediaCallback);
             this.mediaController = mediaController;
             this.currentMediaKey = key;
+            this.currentMediaTitle = null;
+            this.currentMediaDuration = -1L;
+            this.swappedLayout = false;
+            this.swappedSongTitle = null;
+            this.swappedArtist = null;
+            this.lastSubtitle = null;
+            this.lastRawTitle = null;
+            this.lastArtistMeta = null;
+            this.lastNotifTitle = null;
+            this.currentFavorite = null;
             sendMusicStateFromController(packageName, pendingIntent);
             Log.i(Settings.TAG, "Media session attached: " + packageName);
-        } catch (Throwable th) {
-            Log.e(Settings.TAG, "Failed to attach media session", th);
+        } catch (Throwable th3) {
+            Log.e(Settings.TAG, "Failed to attach media session", th3);
             releaseMediaController();
         }
     }
 
-    // fixed128: refresh the lyric candidates from the currently active
-    // media notification. The candidates are otherwise only updated when
-    // a notification arrives (handleMediaNotification), but
-    // sendMusicStateFromController() also runs on MediaSession metadata
-    // changes (onMetadataChanged) — and a lyric line delivered through
-    // the metadata (DISPLAY_SUBTITLE) would then lose to a stale
-    // notification candidate. Re-reading the active notification keeps
-    // ticker/text/bigText fresh on every lyric pick.
-    private void refreshLyricCandidatesFromActive() {
+    private Bitmap getActiveNotificationLargeIcon() {
+        StatusBarNotification[] activeNotifications;
         try {
-            if (this.currentMediaKey == null) {
-                return;
+            if (this.currentMediaKey == null || (activeNotifications = getActiveNotifications()) == null) {
+                return null;
             }
-            StatusBarNotification[] active = getActiveNotifications();
-            if (active == null) {
-                return;
-            }
-            for (StatusBarNotification sbn : active) {
-                if (sbn != null && this.currentMediaKey.equals(sbn.getKey())) {
-                    updateLyricCandidates(sbn.getNotification(), true);
-                    return;
+            for (StatusBarNotification statusBarNotification : activeNotifications) {
+                if (statusBarNotification != null && this.currentMediaKey.equals(statusBarNotification.getKey())) {
+                    Notification notification = statusBarNotification.getNotification();
+                    if (notification == null || notification.extras == null) {
+                        return null;
+                    }
+                    Parcelable parcelable = notification.extras.getParcelable("android.largeIcon");
+                    if (parcelable instanceof Bitmap) {
+                        return (Bitmap) parcelable;
+                    }
+                    try {
+                        Icon largeIcon = notification.getLargeIcon();
+                        if (largeIcon != null) {
+                            Drawable drawableLoadDrawable = largeIcon.loadDrawable(this);
+                            if (drawableLoadDrawable instanceof BitmapDrawable) {
+                                return ((BitmapDrawable) drawableLoadDrawable).getBitmap();
+                            }
+                        }
+                    } catch (Throwable th) {
+                    }
+                    return null;
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable th2) {
         }
+        return null;
     }
 
-    /**
-     * Reads lyric candidates out of a media notification. Different apps hide the
-     * current lyric line in different places: QQ Music uses android.text,
-     * NetEase Cloud Music puts it in tickerText (that's the line scrolling in
-     * the status bar) while android.text is just the artist. We keep all three
-     * and let sendMusicStateFromController pick the first one that is not the
-     * title/artist. sameSong=true (same notification key, or same title on a
-     * re-post) only overwrites slots that have a value, so a lyric-less re-post
-     * does not wipe the lyric we already have.
-     */
-    private void updateLyricCandidates(Notification notification, boolean sameSong) {
+    private void refreshLyricCandidatesFromActive() {
+        StatusBarNotification[] activeNotifications;
         try {
-            String text = null;
-            String bigText = null;
-            String ticker = null;
-            if (notification != null && notification.extras != null) {
-                CharSequence cs = notification.extras.getCharSequence("android.text");
-                if (cs != null) {
-                    text = cs.toString().trim();
-                }
-                CharSequence cb = notification.extras.getCharSequence("android.bigText");
-                if (cb != null) {
-                    bigText = cb.toString().trim();
-                }
+            if (this.currentMediaKey == null || (activeNotifications = getActiveNotifications()) == null) {
+                return;
             }
-            if (notification != null && notification.tickerText != null) {
-                ticker = notification.tickerText.toString().trim();
-            }
-            if (sameSong) {
-                if (text != null && !text.isEmpty()) {
-                    this.currentLyricText = text;
+            for (StatusBarNotification statusBarNotification : activeNotifications) {
+                if (statusBarNotification != null && this.currentMediaKey.equals(statusBarNotification.getKey())) {
+                    updateLyricCandidates(statusBarNotification.getNotification(), true);
+                    return;
                 }
-                if (bigText != null && !bigText.isEmpty()) {
-                    this.currentLyricBigText = bigText;
-                }
-                if (ticker != null && !ticker.isEmpty()) {
-                    this.currentLyricTicker = ticker;
-                }
-            } else {
-                this.currentLyricText = text;
-                this.currentLyricBigText = bigText;
-                this.currentLyricTicker = ticker;
             }
         } catch (Throwable th) {
         }
     }
 
-    private static boolean isLyricCandidate(String s, String title, String artist, String albumArtist) {
+    /* JADX WARN: Code duplicated, block: B:16:0x0035  */
+    private void updateLyricCandidates(Notification notification, boolean z) {
+        String strTrim;
+        String strTrim2;
+        String strTrim3 = null;
+        if (notification == null) {
+            strTrim = null;
+            strTrim2 = null;
+        } else {
+            try {
+                if (notification.extras != null) {
+                    CharSequence charSequence = notification.extras.getCharSequence("android.text");
+                    if (charSequence == null) {
+                        strTrim = null;
+                    } else {
+                        strTrim = charSequence.toString().trim();
+                    }
+                    CharSequence charSequence2 = notification.extras.getCharSequence("android.bigText");
+                    if (charSequence2 == null) {
+                        strTrim2 = null;
+                    } else {
+                        strTrim2 = charSequence2.toString().trim();
+                    }
+                } else {
+                    strTrim = null;
+                    strTrim2 = null;
+                }
+            } catch (Throwable th) {
+                return;
+            }
+        }
+        if (notification != null && notification.tickerText != null) {
+            strTrim3 = notification.tickerText.toString().trim();
+        }
+        if (z) {
+            if (strTrim != null && !strTrim.isEmpty()) {
+                this.currentLyricText = strTrim;
+            }
+            if (strTrim2 != null && !strTrim2.isEmpty()) {
+                this.currentLyricBigText = strTrim2;
+            }
+            if (strTrim3 != null && !strTrim3.isEmpty()) {
+                this.currentLyricTicker = strTrim3;
+                return;
+            }
+            return;
+        }
+        this.currentLyricText = strTrim;
+        this.currentLyricBigText = strTrim2;
+        this.currentLyricTicker = strTrim3;
+    }
+
+    // fixed182: 2.0's isLyricCandidate, completed — a lyric line
+    // is never the song title, the artist, the album artist, a
+    // song+artist combination, a credits line, a status line or a
+    // copyright notice. The credit/status/copyright checks now live
+    // INSIDE the check (2.0 v172/v228), so every candidate is
+    // filtered instead of relying on the caller.
+    private static boolean isLyricCandidate(String str, String str2, String str3, String str4) {
+        if (str == null) {
+            return false;
+        }
         try {
-            if (s == null) {
+            String strTrim = str.trim();
+            if (strTrim.isEmpty()) {
                 return false;
             }
-            s = s.trim();
-            if (s.isEmpty()) {
+            if (isCreditOrLyricTitle(strTrim)) {
                 return false;
             }
-            if (title != null && !title.isEmpty()) {
-                if (s.equals(title) || s.startsWith(title + " - ") || s.endsWith(" - " + title)
-                        || s.startsWith(title + "：") || s.endsWith("：" + title)) {
+            if (isStatusMessage(strTrim)) {
+                return false;
+            }
+            if (isCopyrightNotice(strTrim)) {
+                return false;
+            }
+            if (str2 != null && !str2.isEmpty() && (strTrim.equals(str2) || strTrim.startsWith(str2 + " - ") || strTrim.endsWith(" - " + str2) || strTrim.startsWith(str2 + "：") || strTrim.endsWith("：" + str2) || strTrim.startsWith(str2 + " \u2013 ") || strTrim.endsWith(" \u2013 " + str2))) {
+                return false;
+            }
+            if (str3 != null && !str3.isEmpty() && (strTrim.equals(str3) || strTrim.equals(str2 + " - " + str3) || strTrim.equals(str3 + " - " + str2) || strTrim.equals(str2 + "：" + str3) || strTrim.equals(str3 + "：" + str2) || strTrim.equals(str2 + " \u2013 " + str3) || strTrim.equals(str3 + " \u2013 " + str2))) {
+                return false;
+            }
+            // fixed182: 2.0 v233 — "artist - album" is metadata,
+            // never a lyric. A real lyric line never starts with
+            // the artist's name followed by a separator.
+            if (str3 != null && !str3.isEmpty() && (strTrim.startsWith(str3 + " - ") || strTrim.startsWith(str3 + " \u2013 ") || strTrim.startsWith(str3 + "："))) {
+                return false;
+            }
+            if (str4 != null && !str4.isEmpty() && strTrim.equals(str4)) {
+                return false;
+            }
+            if (str2 != null && !str2.isEmpty()) {
+                String strReplaceAll = strTrim.replaceAll("\\s+", "");
+                String strReplaceAll2 = str2.replaceAll("\\s+", "");
+                if (!strReplaceAll2.isEmpty() && (strReplaceAll.equals(strReplaceAll2) || strReplaceAll.startsWith(strReplaceAll2 + "-") || strReplaceAll.startsWith(strReplaceAll2 + "："))) {
                     return false;
                 }
-            }
-            if (artist != null && !artist.isEmpty()) {
-                if (s.equals(artist) || s.equals(title + " - " + artist) || s.equals(artist + " - " + title)
-                        || s.equals(title + "：" + artist) || s.equals(artist + "：" + title)) {
-                    return false;
+                if (str3 != null && !str3.isEmpty()) {
+                    String strReplaceAll3 = str3.replaceAll("\\s+", "");
+                    return (!strReplaceAll3.isEmpty() && strReplaceAll.contains(strReplaceAll2) && strReplaceAll.contains(strReplaceAll3)) ? false : true;
                 }
-            }
-            if (albumArtist != null && !albumArtist.isEmpty() && s.equals(albumArtist)) {
-                return false;
+                return true;
             }
             return true;
         } catch (Throwable th) {
@@ -1613,52 +1830,93 @@ public class NotificationService extends NotificationListenerService {
         }
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
-    // fixed17: NetEase (and some other players) put the current lyric line
-    // into the MediaSession TITLE — e.g. "词：许嵩" (a credits line) or a
-    // lyric sentence. MusicBubble treats any title change as a song change
-    // (z), so every lyric refresh popped the docked player back out. A
-    // credits/lyric line is never a song title: keep the previous real
-    // title instead.
-    private static boolean isCreditOrLyricTitle(String s) {
-        if (s == null) {
+    private static boolean isCreditOrLyricTitle(String str) {
+        if (str == null) {
             return false;
         }
-        String t = s.trim();
-        String[] prefixes = {"词：", "曲：", "词:", "曲:", "作词", "作曲", "编曲", "演唱", "原唱", "词曲", "作词：", "作曲：", "编曲：", "演唱：", "原唱："};
-        for (String p : prefixes) {
-            if (t.startsWith(p)) {
+        String strTrim = str.trim();
+        // fixed182: 2.0's credits, completed — the 15 original
+        // Chinese prefixes, plus v228 production credits
+        // (制作/混音/母带/监制/出品/发行).
+        String[] strArr = {"词：", "曲：", "词:", "曲:", "作词", "作曲", "编曲", "演唱", "原唱", "词曲", "作词：", "作曲：", "编曲：", "演唱：", "原唱：",
+                "制作", "混音", "母带", "监制", "出品", "发行", "制作：", "混音：", "母带：", "监制：", "出品：", "发行："};
+        for (int i = 0; i < strArr.length; i++) {
+            if (strTrim.startsWith(strArr[i])) {
+                return true;
+            }
+        }
+        // fixed182: 2.0 v209 English credits (case-insensitive) —
+        // "Lyrics by: ..." from LRCLIB / ticker was passing as a
+        // title and as a lyric.
+        String low = strTrim.toLowerCase(java.util.Locale.ROOT);
+        String[] enPrefixes = {"lyrics by", "lyric by", "lyrics:", "lyric:", "written by", "composed by", "music by", "words by", "arranged by", "produced by", "mixed by", "mastered by"};
+        for (String p : enPrefixes) {
+            if (low.startsWith(p)) {
                 return true;
             }
         }
         return false;
     }
 
-    // fixed31: delayed "music inactive" (see field comment). Cancels any
-    // pending inactive broadcast — called when a media notification
-    // attaches, i.e. the removal was just a re-post, not a real stop.
+    // fixed182: 2.0 v228 — a status line is never a lyric
+    // (NetEase "网易云音乐正在播放", "列表为空", "暂无", ...).
+    private static boolean isStatusMessage(String str) {
+        if (str == null || str.isEmpty()) {
+            return false;
+        }
+        return str.contains("\u5217\u8868\u4e3a\u7a7a")
+                || str.contains("\u70b9\u51fb\u9009\u62e9")
+                || str.contains("\u70b9\u51fb\u64ad\u653e")
+                || str.contains("\u6682\u65e0")
+                || str.contains("\u672a\u64ad\u653e")
+                || str.contains("\u6ca1\u6709\u6b63\u5728\u64ad\u653e")
+                || str.contains("\u97f3\u4e50\u6b63\u5728\u64ad\u653e");
+    }
+
+    // fixed182: 2.0 v228 — a copyright notice is never a lyric
+    // ("(© ...)" / "(P) 2024 ..." / "版权所有").
+    private static boolean isCopyrightNotice(String str) {
+        if (str == null) {
+            return false;
+        }
+        String t = str.trim();
+        if (t.isEmpty()) {
+            return false;
+        }
+        if (t.contains("\u00a9") || t.contains("\u2117")
+                || t.contains("\u7248\u6743")) {
+            return true;
+        }
+        String low = t.toLowerCase(java.util.Locale.ROOT);
+        if (low.contains("copyright")) {
+            return true;
+        }
+        if (t.startsWith("(P)") || t.startsWith("(C)")
+                || t.startsWith("(p)") || t.startsWith("(c)")) {
+            return true;
+        }
+        return false;
+    }
+
     private void cancelPendingMusicInactive() {
         try {
             if (this.pendingMusicInactiveRunnable != null) {
                 this.mainHandler.removeCallbacks(this.pendingMusicInactiveRunnable);
                 this.pendingMusicInactiveRunnable = null;
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable th) {
         }
     }
 
-    // fixed31: schedule the inactive broadcast 2s out. It only fires if
-    // no replacement media session attached in the meantime (a real stop),
-    // so lyric re-posts never hide-then-re-pop the player.
-    private void sendMusicInactiveDelayed(final String pkg) {
+    /* JADX INFO: Access modifiers changed from: private */
+    public void sendMusicInactiveDelayed(final String str) {
         cancelPendingMusicInactive();
-        this.pendingMusicInactiveRunnable = new Runnable() {
-            @Override
+        this.pendingMusicInactiveRunnable = new Runnable() { // from class: com.jarvis.bubblenotify.NotificationService.6
+            @Override // java.lang.Runnable
             public void run() {
                 try {
-                    if (NotificationService.this.mediaController == null
-                            && NotificationService.this.currentMediaKey == null) {
-                        NotificationService.this.sendMusicBroadcast(false, false, null, null, null, pkg, null, -1L, -1L, null);
+                    if (NotificationService.this.mediaController == null && NotificationService.this.currentMediaKey == null) {
+                        NotificationService.this.sendMusicBroadcast(false, false, null, null, null, str, null, -1L, -1L, null);
                         Log.i(Settings.TAG, "Media inactive (delayed).");
                     }
                 } catch (Throwable th) {
@@ -1669,146 +1927,666 @@ public class NotificationService extends NotificationListenerService {
         this.mainHandler.postDelayed(this.pendingMusicInactiveRunnable, MUSIC_INACTIVE_DELAY_MS);
     }
 
+    /* JADX WARN: Code duplicated, block: B:104:0x012d A[Catch: all -> 0x0354, TRY_ENTER, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:113:0x015e  */
+    /* JADX WARN: Code duplicated, block: B:115:0x0162 A[ADDED_TO_REGION] */
+    /* JADX WARN: Code duplicated, block: B:125:0x0199  */
+    /* JADX WARN: Code duplicated, block: B:127:0x019c A[ADDED_TO_REGION] */
+    /* JADX WARN: Code duplicated, block: B:192:0x0268  */
+    /* JADX WARN: Code duplicated, block: B:194:0x026b A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:196:0x0278  */
+    /* JADX WARN: Code duplicated, block: B:199:0x0282 A[ADDED_TO_REGION] */
+    /* JADX WARN: Code duplicated, block: B:210:0x02a5 A[ADDED_TO_REGION, REMOVE] */
+    /* JADX WARN: Code duplicated, block: B:213:0x02aa A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:226:0x02d2  */
+    /* JADX WARN: Code duplicated, block: B:229:0x02df  */
+    /* JADX WARN: Code duplicated, block: B:230:0x02e0  */
+    /* JADX WARN: Code duplicated, block: B:232:0x02e4  */
+    /* JADX WARN: Code duplicated, block: B:233:0x02e5  */
+    /* JADX WARN: Code duplicated, block: B:235:0x02e8  */
+    /* JADX WARN: Code duplicated, block: B:236:0x02ea A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:238:0x02f2 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:239:0x02f5 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:241:0x02fd A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:242:0x0300 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:244:0x0308 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:245:0x030b A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:247:0x0311  */
+    /* JADX WARN: Code duplicated, block: B:248:0x0313  */
+    /* JADX WARN: Code duplicated, block: B:251:0x031c A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:253:0x0324 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:255:0x032d  */
+    /* JADX WARN: Code duplicated, block: B:256:0x032e A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:259:0x033d A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:64:0x00b9 A[ADDED_TO_REGION] */
+    /* JADX WARN: Code duplicated, block: B:66:0x00be  */
+    /* JADX WARN: Code duplicated, block: B:69:0x00c4 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:75:0x00e0 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:78:0x00e8 A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    /* JADX WARN: Code duplicated, block: B:83:0x00f8 A[DONT_INVERT] */
+    /* JADX WARN: Code duplicated, block: B:84:0x00fa A[Catch: all -> 0x0354, TryCatch #2 {all -> 0x0354, blocks: (B:5:0x0009, B:7:0x000f, B:13:0x001c, B:28:0x003f, B:261:0x0345, B:31:0x0051, B:33:0x0063, B:35:0x006b, B:37:0x0073, B:45:0x0089, B:47:0x008d, B:51:0x0099, B:53:0x00a1, B:65:0x00bb, B:69:0x00c4, B:71:0x00ca, B:73:0x00d0, B:75:0x00e0, B:76:0x00e2, B:78:0x00e8, B:80:0x00ec, B:82:0x00f4, B:97:0x0116, B:104:0x012d, B:106:0x0133, B:108:0x0139, B:110:0x0156, B:116:0x0164, B:118:0x016a, B:120:0x0170, B:122:0x018d, B:128:0x019e, B:130:0x01a4, B:133:0x01ae, B:197:0x027e, B:200:0x0284, B:202:0x0288, B:205:0x0292, B:207:0x0298, B:211:0x02a6, B:213:0x02aa, B:216:0x02b0, B:218:0x02b7, B:220:0x02bb, B:222:0x02c1, B:225:0x02cc, B:227:0x02d3, B:249:0x0314, B:251:0x031c, B:253:0x0324, B:257:0x0337, B:259:0x033d, B:256:0x032e, B:236:0x02ea, B:238:0x02f2, B:239:0x02f5, B:241:0x02fd, B:242:0x0300, B:244:0x0308, B:245:0x030b, B:224:0x02c9, B:138:0x01bd, B:140:0x01c1, B:142:0x01c9, B:144:0x01cd, B:158:0x01f4, B:160:0x01fa, B:162:0x0206, B:164:0x020a, B:166:0x0212, B:171:0x021f, B:175:0x022b, B:177:0x0235, B:179:0x023b, B:181:0x0243, B:183:0x024b, B:185:0x0253, B:187:0x025b, B:194:0x026b, B:148:0x01d9, B:150:0x01dd, B:152:0x01e5, B:154:0x01e9, B:84:0x00fa, B:86:0x0100), top: B:270:0x0009 }] */
+    // fixed189: parse "song-artist" (2.0 v206/v211/v215). Dash
+    // order: U+2013 (en dash), then '-', then U+00B7 (middle dot).
+    // The dash must not be at either end. Returns [before, after]
+    // or null.
+    private static String[] parseArtistSong(String s) {
+        if (s == null || s.isEmpty()) {
+            return null;
+        }
+        int dash = s.indexOf('\u2013');
+        if (dash < 0) {
+            dash = s.indexOf('-');
+        }
+        if (dash < 0) {
+            dash = s.indexOf('\u00b7');
+        }
+        if (dash <= 0 || dash >= s.length() - 1) {
+            return null;
+        }
+        String a = s.substring(0, dash).trim();
+        String b = s.substring(dash + 1).trim();
+        if (a.isEmpty() || b.isEmpty()) {
+            return null;
+        }
+        return new String[]{a, b};
+    }
+
+    // fixed189: resolve Flyme song/artist (2.0 v206/v211/v215).
+    // DISPLAY_SUBTITLE is "song-artist" (song first); if it does
+    // not split, the whole subtitle is the artist. If the song is
+    // still unknown, split metadata ARTIST the same way (Flyme's
+    // ARTIST is "song-artist", song first). ALBUM is never a song
+    // (v215 lesson); metadata TITLE is a lyric, never a song.
+    // Returns [song, artist] (either may be null) or null if
+    // nothing usable.
+    private static String[] resolveFlymeSongArtist(String subtitle, String metaArtist, String album) {
+        String song = null;
+        String artist = null;
+        if (subtitle != null && !subtitle.isEmpty()
+                && !isStatusMessage(subtitle)
+                && !isCreditOrLyricTitle(subtitle)) {
+            String[] p = parseArtistSong(subtitle);
+            if (p != null) {
+                song = p[0];
+                artist = p[1];
+            } else {
+                artist = subtitle;
+            }
+        }
+        if (song == null && metaArtist != null && !metaArtist.isEmpty()
+                && !isStatusMessage(metaArtist)
+                && !isCreditOrLyricTitle(metaArtist)) {
+            String[] p = parseArtistSong(metaArtist);
+            if (p != null) {
+                song = p[0];
+                if (artist == null) {
+                    artist = p[1];
+                }
+            }
+        }
+        if (song == null && artist == null) {
+            return null;
+        }
+        return new String[]{song, artist};
+    }
+
+    // fixed190: download capsule uses 2.0's dual condition
+    // (v110/v241). A download needs BOTH real progress AND a
+    // download signal. Pure-progress checks mis-detected chat
+    // messages with stale progress extras as downloads.
+
+
+
     public void sendMusicStateFromController(String str, PendingIntent pendingIntent) {
-        Bitmap bitmapScaleBitmap;
         long j;
+        String string;
         String str2;
-        String str3;
+        boolean z;
+        long j2 = -1;
+        String str3 = null;
+        boolean z2 = false;
+        String str4;
+        String str5;
+        long j3 = 0;
+        String string2 = null;
+        String string3;
+        String strTrim;
+        String strTrim2;
+        boolean z3;
+        String str6;
+        String str7;
+        long j4;
+        String str8;
+        String str9;
+        String str10;
+        Bitmap bitmap;
+        Boolean favoriteState;
+        Bitmap bitmap2;
+        String str11;
+        String str12;
+        long j5;
+        boolean z4;
+        boolean z5 = false;
+        boolean z6;
         MediaController mediaController = this.mediaController;
         if (mediaController == null) {
             return;
         }
         try {
             PlaybackState playbackState = mediaController.getPlaybackState();
-            boolean z = playbackState != null && playbackState.getState() == 3;
-            long j2 = -1;
+            boolean z7 = playbackState != null && playbackState.getState() == 3;
             long position = playbackState != null ? playbackState.getPosition() : -1L;
-            // fixed56: PlaybackState.getPosition() is the position at the
-            // LAST position update, not now — many players (QQ Music
-            // re-posting every lyric line) only update it on state
-            // changes, so every broadcast reset the bubble's base to the
-            // same stale value and the progress bar looked frozen at
-            // e.g. 0:54. Correct it with getLastPositionUpdateTime()
-            // while playing, so the broadcast carries the live position.
-            if (z && position >= 0 && playbackState != null) {
+            if (z7 && position >= 0 && playbackState != null) {
                 try {
-                    long lastUpdate = playbackState.getLastPositionUpdateTime();
-                    if (lastUpdate > 0) {
-                        position += android.os.SystemClock.elapsedRealtime() - lastUpdate;
+                    long lastPositionUpdateTime = playbackState.getLastPositionUpdateTime();
+                    if (lastPositionUpdateTime > 0) {
+                        position += SystemClock.elapsedRealtime() - lastPositionUpdateTime;
                     }
-                } catch (Throwable ignored) {
+                    j = position;
+                } catch (Throwable th) {
+                    j = position;
                 }
+            } else {
+                j = position;
             }
             MediaMetadata metadata = mediaController.getMetadata();
-            String lyric = null;
             if (metadata == null) {
-                bitmapScaleBitmap = null;
-                j = -1;
-                str2 = null;
-                str3 = null;
+                str11 = null;
+                str12 = null;
+                bitmap2 = null;
+                j5 = -1;
+                string = null;
             } else {
-                String string = metadata.getString("android.media.metadata.TITLE");
-                String string2 = metadata.getString("android.media.metadata.ARTIST");
-                // fixed18: prefer the notification title — it is the stable
-                // song title. The MediaSession TITLE is polluted with the
-                // current lyric line by NetEase, which faked song changes
-                // and popped the docked player out on every lyric refresh.
-                if (this.currentNotifTitle != null && !this.currentNotifTitle.isEmpty()
-                        && !isCreditOrLyricTitle(this.currentNotifTitle)) {
-                    string = this.currentNotifTitle;
-                }
-                // fixed19 (strengthened in fixed26): sticky title. A title
-                // change is a lyric line, not a new song, if the duration is
-                // unchanged (same song) — regardless of position — or, when
-                // the duration is unavailable, if we are mid-song (position
-                // past 5s). The old check also required position > 10s, so a
-                // lyric line arriving in the first 10s (or with no duration
-                // reported) was accepted as a new title and popped the docked
-                // player out — twice, once per lyric line. Only a duration
-                // change, or a title change with the position reset near 0
-                // (a new song just started), accepts a new title.
-                long durForTitle = -1;
-                try {
-                    durForTitle = metadata.getLong("android.media.metadata.DURATION");
-                } catch (Throwable ignored) {
-                }
-                boolean sameSong = this.currentMediaTitle != null && !this.currentMediaTitle.isEmpty()
-                        && ((durForTitle > 0 && this.currentMediaDuration > 0
-                                && durForTitle == this.currentMediaDuration)
-                            || (durForTitle <= 0 && position > 5000));
-                if (sameSong) {
-                    string = this.currentMediaTitle;
-                } else if (durForTitle > 0) {
-                    this.currentMediaDuration = durForTitle;
-                }
-                // fixed17: a credits/lyric line in TITLE is not a new song —
-                // keep the previous real title so lyric refreshes don't fake
-                // a song change and pop the docked player out.
-                if (isCreditOrLyricTitle(string) && this.currentMediaTitle != null && !this.currentMediaTitle.isEmpty()) {
-                    string = this.currentMediaTitle;
-                } else if (string != null && !string.isEmpty()) {
-                    this.currentMediaTitle = string;
+                String string4 = metadata.getString("android.media.metadata.TITLE");
+                string = metadata.getString("android.media.metadata.ARTIST");
+                if (this.currentNotifTitle != null && !this.currentNotifTitle.isEmpty() && !isCreditOrLyricTitle(this.currentNotifTitle)) {
+                    str2 = this.currentNotifTitle;
+                    z = true;
+                } else {
+                    str2 = string4;
+                    z = false;
                 }
                 try {
                     j2 = metadata.getLong("android.media.metadata.DURATION");
-                } catch (Throwable th) {
+                } catch (Throwable th2) {
+                    j2 = -1;
                 }
-                String albumArtist = null;
                 try {
-                    albumArtist = metadata.getString("android.media.metadata.ALBUM_ARTIST");
-                } catch (Throwable th) {
+                    try {
+                        try {
+                            if (this.currentMediaTitle == null || this.currentMediaTitle.isEmpty()) {
+                                str3 = string4;
+                            } else {
+                                if (j2 > 0) {
+                                    str3 = string4;
+                                    if (this.currentMediaDuration <= 0 || j2 != this.currentMediaDuration) {
+                                    }
+                                    z2 = true;
+                                    if (!z2 && !z) {
+                                        str4 = this.currentMediaTitle;
+                                    } else {
+                                        str4 = str2;
+                                    }
+                                    if (j2 > 0 && this.currentMediaDuration > 0 && j2 != this.currentMediaDuration) {
+                                        this.swappedLayout = false;
+                                        this.swappedSongTitle = null;
+                                        this.swappedArtist = null;
+                                        this.lastArtistMeta = null;
+                                        this.lastNotifTitle = null;
+                                        this.currentFavorite = null;
+                                    }
+                                    if (j2 > 0) {
+                                        this.currentMediaDuration = j2;
+                                    }
+                                    if (!isCreditOrLyricTitle(str4) && this.currentMediaTitle != null && !this.currentMediaTitle.isEmpty()) {
+                                        str5 = this.currentMediaTitle;
+                                    } else {
+                                        if (str4 != null && !str4.isEmpty()) {
+                                            this.currentMediaTitle = str4;
+                                        }
+                                        str5 = str4;
+                                    }
+                                    j3 = metadata.getLong("android.media.metadata.DURATION");
+                                    string2 = metadata.getString("android.media.metadata.ALBUM_ARTIST");
+                                    refreshLyricCandidatesFromActive();
+                                    string3 = metadata.getString("android.media.metadata.DISPLAY_SUBTITLE");
+                                    if (string3 == null && !string3.isEmpty() && string3.contains("-")) {
+                                        int iIndexOf = string3.indexOf(45);
+                                        strTrim2 = string3.substring(0, iIndexOf).trim();
+                                        strTrim = string3.substring(iIndexOf + 1).trim();
+                                        if (strTrim2.isEmpty() || strTrim.isEmpty()) {
+                                            strTrim = null;
+                                            strTrim2 = null;
+                                        }
+                                    } else {
+                                        strTrim = null;
+                                        strTrim2 = null;
+                                    }
+                                    if (strTrim2 != null && string != null && !string.isEmpty() && string.contains("-")) {
+                                        int iIndexOf2 = string.indexOf(45);
+                                        String strTrim3 = string.substring(0, iIndexOf2).trim();
+                                        String strTrim4 = string.substring(iIndexOf2 + 1).trim();
+                                        if (!strTrim3.isEmpty() && !strTrim4.isEmpty()) {
+                                            strTrim = strTrim4;
+                                            strTrim2 = strTrim3;
+                                            z3 = true;
+                                        } else {
+                                            z3 = false;
+                                        }
+                                    } else {
+                                        z3 = false;
+                                    }
+                                    if (strTrim2 != null || str3 == null || str3.isEmpty()) {
+                                        str6 = str5;
+                                        str7 = str3;
+                                        j4 = j3;
+                                    } else {
+                                        str7 = str3;
+                                        if (strTrim2.equals(str7)) {
+                                            str6 = str5;
+                                            j4 = j3;
+                                        } else if (string == null || !strTrim2.equals(string)) {
+                                            if (z3) {
+                                                z4 = (this.lastArtistMeta == null || !this.lastArtistMeta.equals(string) || this.lastRawTitle == null || this.lastRawTitle.equals(str7)) ? false : true;
+                                            } else {
+                                                z4 = (this.lastSubtitle == null || !this.lastSubtitle.equals(string3) || this.lastRawTitle == null || this.lastRawTitle.equals(str7)) ? false : true;
+                                            }
+                                            str6 = str5;
+                                            if (this.lastNotifTitle == null) {
+                                                j4 = j3;
+                                            } else {
+                                                j4 = j3;
+                                                if (this.lastNotifTitle.equals(this.currentNotifTitle) && this.lastRawTitle != null && !this.lastRawTitle.equals(str7) && !str7.equals(this.currentNotifTitle)) {
+                                                    z5 = true;
+                                                }
+                                                if (!strTrim2.equals(this.currentNotifTitle) || z4 || ((!z3 && str7.length() > strTrim2.length()) || isCreditOrLyricTitle(str7) || str7.startsWith("女：") || str7.startsWith("男：") || str7.startsWith("合：") || str7.startsWith("女:") || str7.startsWith("男:") || z5)) {
+                                                    z6 = true;
+                                                } else {
+                                                    z6 = false;
+                                                }
+                                                if (z6) {
+                                                    this.swappedLayout = true;
+                                                    this.swappedSongTitle = strTrim2;
+                                                    this.swappedArtist = strTrim;
+                                                }
+                                            }
+                                            z5 = false;
+                                            if (strTrim2.equals(this.currentNotifTitle)) {
+                                                z6 = true;
+                                            } else {
+                                                z6 = true;
+                                            }
+                                            if (z6) {
+                                                this.swappedLayout = true;
+                                                this.swappedSongTitle = strTrim2;
+                                                this.swappedArtist = strTrim;
+                                            }
+                                        } else {
+                                            str6 = str5;
+                                            j4 = j3;
+                                        }
+                                    }
+                                    if (!this.swappedLayout && strTrim2 != null && this.swappedSongTitle != null && !strTrim2.equals(this.swappedSongTitle) && str7 != null && str7.equals(strTrim2)) {
+                                        this.swappedLayout = false;
+                                        str8 = null;
+                                        this.swappedSongTitle = null;
+                                        this.swappedArtist = null;
+                                    } else {
+                                        str8 = null;
+                                    }
+                                    if (!this.swappedLayout && this.swappedSongTitle != null && str7 != null && !str7.isEmpty()) {
+                                        String str13 = this.swappedSongTitle;
+                                        if (string == null || string.isEmpty() || string.contains(this.swappedSongTitle)) {
+                                            string = this.swappedArtist;
+                                        }
+                                        this.currentMediaTitle = str13;
+                                        str6 = str13;
+                                        str9 = str7;
+                                    } else {
+                                        str9 = str8;
+                                    }
+                                    this.lastSubtitle = string3;
+                                    this.lastRawTitle = str7;
+                                    this.lastArtistMeta = string;
+                                    this.lastNotifTitle = this.currentNotifTitle;
+                                    if (strTrim2 == null) {
+                                        strTrim2 = str6;
+                                    }
+                                    if (strTrim == null) {
+                                        strTrim = string;
+                                    }
+                                    if (str9 != null) {
+                                        str10 = str9;
+                                    } else if (isLyricCandidate(this.currentLyricTicker, strTrim2, strTrim, string2)) {
+                                        str10 = this.currentLyricTicker;
+                                    } else if (isLyricCandidate(this.currentLyricText, strTrim2, strTrim, string2)) {
+                                        str10 = this.currentLyricText;
+                                    } else if (isLyricCandidate(this.currentLyricBigText, strTrim2, strTrim, string2)) {
+                                        str10 = this.currentLyricBigText;
+                                    } else if (!isLyricCandidate(string3, strTrim2, strTrim, string2)) {
+                                        str10 = str8;
+                                    } else {
+                                        str10 = string3;
+                                    }
+                                    bitmap = metadata.getBitmap("android.media.metadata.ALBUM_ART");
+                                    if (bitmap == null) {
+                                        bitmap = metadata.getBitmap("android.media.metadata.DISPLAY_ICON");
+                                    }
+                                    if (bitmap == null) {
+                                        bitmap = getActiveNotificationLargeIcon();
+                                    }
+                                    if (bitmap != null) {
+                                        bitmap = scaleBitmap(bitmap, 96);
+                                    }
+                                    favoriteState = readFavoriteState(metadata);
+                                    if (favoriteState != null) {
+                                        this.currentFavorite = favoriteState;
+                                    }
+                                    bitmap2 = bitmap;
+                                    str11 = str10;
+                                    str12 = str6;
+                                    j5 = j4;
+                                } else {
+                                    str3 = string4;
+                                }
+                                if (j2 <= 0 && j > 5000) {
+                                    z2 = true;
+                                }
+                                if (!z2) {
+                                    str4 = str2;
+                                } else {
+                                    str4 = str2;
+                                }
+                                if (j2 > 0) {
+                                    this.swappedLayout = false;
+                                    this.swappedSongTitle = null;
+                                    this.swappedArtist = null;
+                                    this.lastArtistMeta = null;
+                                    this.lastNotifTitle = null;
+                                    this.currentFavorite = null;
+                                }
+                                if (j2 > 0) {
+                                    this.currentMediaDuration = j2;
+                                }
+                                if (!isCreditOrLyricTitle(str4)) {
+                                    if (str4 != null) {
+                                        this.currentMediaTitle = str4;
+                                    }
+                                    str5 = str4;
+                                } else {
+                                    if (str4 != null) {
+                                        this.currentMediaTitle = str4;
+                                    }
+                                    str5 = str4;
+                                }
+                                j3 = metadata.getLong("android.media.metadata.DURATION");
+                                string2 = metadata.getString("android.media.metadata.ALBUM_ARTIST");
+                                refreshLyricCandidatesFromActive();
+                                string3 = metadata.getString("android.media.metadata.DISPLAY_SUBTITLE");
+                                if (string3 == null) {
+                                    strTrim = null;
+                                    strTrim2 = null;
+                                } else {
+                                    strTrim = null;
+                                    strTrim2 = null;
+                                }
+                                if (strTrim2 != null) {
+                                    z3 = false;
+                                } else {
+                                    z3 = false;
+                                }
+                                if (strTrim2 != null) {
+                                    str6 = str5;
+                                    str7 = str3;
+                                    j4 = j3;
+                                } else {
+                                    str6 = str5;
+                                    str7 = str3;
+                                    j4 = j3;
+                                }
+                                if (!this.swappedLayout) {
+                                    str8 = null;
+                                } else {
+                                    str8 = null;
+                                }
+                                if (!this.swappedLayout) {
+                                    str9 = str8;
+                                } else {
+                                    str9 = str8;
+                                }
+                                this.lastSubtitle = string3;
+                                this.lastRawTitle = str7;
+                                this.lastArtistMeta = string;
+                                this.lastNotifTitle = this.currentNotifTitle;
+                                if (strTrim2 == null) {
+                                    strTrim2 = str6;
+                                }
+                                if (strTrim == null) {
+                                    strTrim = string;
+                                }
+                                if (str9 != null) {
+                                    str10 = str9;
+                                } else if (isLyricCandidate(this.currentLyricTicker, strTrim2, strTrim, string2)) {
+                                    str10 = this.currentLyricTicker;
+                                } else if (isLyricCandidate(this.currentLyricText, strTrim2, strTrim, string2)) {
+                                    str10 = this.currentLyricText;
+                                } else if (isLyricCandidate(this.currentLyricBigText, strTrim2, strTrim, string2)) {
+                                    str10 = this.currentLyricBigText;
+                                } else if (!isLyricCandidate(string3, strTrim2, strTrim, string2)) {
+                                    str10 = str8;
+                                } else {
+                                    str10 = string3;
+                                }
+                                bitmap = metadata.getBitmap("android.media.metadata.ALBUM_ART");
+                                if (bitmap == null) {
+                                    bitmap = metadata.getBitmap("android.media.metadata.DISPLAY_ICON");
+                                }
+                                if (bitmap == null) {
+                                    bitmap = getActiveNotificationLargeIcon();
+                                }
+                                if (bitmap != null) {
+                                    bitmap = scaleBitmap(bitmap, 96);
+                                }
+                                favoriteState = readFavoriteState(metadata);
+                                if (favoriteState != null) {
+                                    this.currentFavorite = favoriteState;
+                                }
+                                bitmap2 = bitmap;
+                                str11 = str10;
+                                str12 = str6;
+                                j5 = j4;
+                            }
+                            j3 = metadata.getLong("android.media.metadata.DURATION");
+                        } catch (Throwable th3) {
+                            j3 = -1;
+                        }
+                        string2 = metadata.getString("android.media.metadata.ALBUM_ARTIST");
+                    } catch (Throwable th4) {
+                        string2 = null;
+                    }
+                    string3 = metadata.getString("android.media.metadata.DISPLAY_SUBTITLE");
+                } catch (Throwable th5) {
+                    string3 = null;
                 }
-                // fixed31: lyrics are back to the original notification
-                // source (fixed5 multi-candidate pick). Network lyrics
-                // (fixed18 LRCLIB) are off: the lookup returned nothing
-                // for songs the library does not carry, so the card
-                // showed no lyric at all. Order: tickerText (NetEase)
-                // -> android.text (QQ Music) -> android.bigText ->
-                // DISPLAY_SUBTITLE; each must pass isLyricCandidate
-                // (not the title/artist/album-artist).
-                // fixed128: refresh the notification lyric candidates
-                // from the active notification first, so a metadata-driven
-                // update does not pick a stale notification line over the
-                // fresh DISPLAY_SUBTITLE.
+                z2 = false;
+                if (!z2) {
+                    str4 = str2;
+                } else {
+                    str4 = str2;
+                }
+                if (j2 > 0) {
+                    this.swappedLayout = false;
+                    this.swappedSongTitle = null;
+                    this.swappedArtist = null;
+                    this.lastArtistMeta = null;
+                    this.lastNotifTitle = null;
+                    this.currentFavorite = null;
+                }
+                if (j2 > 0) {
+                    this.currentMediaDuration = j2;
+                }
+                if (!isCreditOrLyricTitle(str4)) {
+                    if (str4 != null) {
+                        this.currentMediaTitle = str4;
+                    }
+                    str5 = str4;
+                } else {
+                    if (str4 != null) {
+                        this.currentMediaTitle = str4;
+                    }
+                    str5 = str4;
+                }
                 refreshLyricCandidatesFromActive();
-                String subtitle = null;
-                try {
-                    subtitle = metadata.getString("android.media.metadata.DISPLAY_SUBTITLE");
-                } catch (Throwable ignored) {
+                if (string3 == null) {
+                    strTrim = null;
+                    strTrim2 = null;
+                } else {
+                    strTrim = null;
+                    strTrim2 = null;
                 }
-                if (isLyricCandidate(this.currentLyricTicker, string, string2, albumArtist)) {
-                    lyric = this.currentLyricTicker;
-                } else if (isLyricCandidate(this.currentLyricText, string, string2, albumArtist)) {
-                    lyric = this.currentLyricText;
-                } else if (isLyricCandidate(this.currentLyricBigText, string, string2, albumArtist)) {
-                    lyric = this.currentLyricBigText;
-                } else if (isLyricCandidate(subtitle, string, string2, albumArtist)) {
-                    lyric = subtitle;
+                if (strTrim2 != null) {
+                    z3 = false;
+                } else {
+                    z3 = false;
                 }
-                Bitmap bitmap = metadata.getBitmap("android.media.metadata.ALBUM_ART");
+                if (strTrim2 != null) {
+                    str6 = str5;
+                    str7 = str3;
+                    j4 = j3;
+                } else {
+                    str6 = str5;
+                    str7 = str3;
+                    j4 = j3;
+                }
+                if (!this.swappedLayout) {
+                    str8 = null;
+                } else {
+                    str8 = null;
+                }
+                if (!this.swappedLayout) {
+                    str9 = str8;
+                } else {
+                    str9 = str8;
+                }
+                this.lastSubtitle = string3;
+                this.lastRawTitle = str7;
+                this.lastArtistMeta = string;
+                this.lastNotifTitle = this.currentNotifTitle;
+                if (strTrim2 == null) {
+                    strTrim2 = str6;
+                }
+                if (strTrim == null) {
+                    strTrim = string;
+                }
+                if (str9 != null) {
+                    str10 = str9;
+                } else if (isLyricCandidate(this.currentLyricTicker, strTrim2, strTrim, string2)) {
+                    str10 = this.currentLyricTicker;
+                } else if (isLyricCandidate(this.currentLyricText, strTrim2, strTrim, string2)) {
+                    str10 = this.currentLyricText;
+                } else if (isLyricCandidate(this.currentLyricBigText, strTrim2, strTrim, string2)) {
+                    str10 = this.currentLyricBigText;
+                } else if (!isLyricCandidate(string3, strTrim2, strTrim, string2)) {
+                    str10 = str8;
+                } else {
+                    str10 = string3;
+                }
+                bitmap = metadata.getBitmap("android.media.metadata.ALBUM_ART");
                 if (bitmap == null) {
                     bitmap = metadata.getBitmap("android.media.metadata.DISPLAY_ICON");
                 }
                 if (bitmap == null) {
-                    j = j2;
-                    str2 = string;
-                    str3 = string2;
-                    bitmapScaleBitmap = bitmap;
-                } else {
-                    j = j2;
-                    str2 = string;
-                    str3 = string2;
-                    bitmapScaleBitmap = scaleBitmap(bitmap, 96);
+                    bitmap = getActiveNotificationLargeIcon();
+                }
+                if (bitmap != null) {
+                    bitmap = scaleBitmap(bitmap, 96);
+                }
+                favoriteState = readFavoriteState(metadata);
+                if (favoriteState != null) {
+                    this.currentFavorite = favoriteState;
+                }
+                bitmap2 = bitmap;
+                str11 = str10;
+                str12 = str6;
+                j5 = j4;
+            }
+            // fixed189: QQ Music Flyme (com.meizu.media.music)
+            // song/artist/lyric/duration recognition (user 2026-11-23
+            // "识别异常了" / "不识别歌词" / "歌曲时长也不识别了").
+            // Root cause: the DISPLAY_SUBTITLE "song-artist" split
+            // was dead code (condition `string3 == null`, always
+            // false), so the title came from the notification title
+            // (a lyric line) and the artist came from metadata
+            // ARTIST raw (Flyme's ARTIST is "song-artist" or a
+            // lyric). Resolve it here, before the network-lyrics
+            // fetch and the broadcast, so maybeFetchNetworkLyrics
+            // also gets the right song/artist.
+            if ("com.meizu.media.music".equals(str) && metadata != null) {
+                String flymeSubtitle = null;
+                String flymeArtist = null;
+                try { flymeSubtitle = metadata.getString("android.media.metadata.DISPLAY_SUBTITLE"); } catch (Throwable ignored) { }
+                try { flymeArtist = metadata.getString("android.media.metadata.ARTIST"); } catch (Throwable ignored) { }
+                String flymeAlbum = null;
+                try { flymeAlbum = metadata.getString("android.media.metadata.ALBUM"); } catch (Throwable ignored) { }
+                String[] resolved = resolveFlymeSongArtist(flymeSubtitle, flymeArtist, flymeAlbum);
+                if (resolved != null) {
+                    if (resolved[0] != null && !resolved[0].isEmpty()) {
+                        str12 = resolved[0];
+                        this.currentMediaTitle = resolved[0];
+                    }
+                    if (resolved[1] != null && !resolved[1].isEmpty()) {
+                        string = resolved[1];
+                    }
+                }
+                // Lyric: Flyme puts the current lyric in the
+                // notification title. If the resolved lyric is
+                // missing or is just the artist name, use the
+                // notification title as the lyric.
+                if ((str11 == null || str11.isEmpty() || (string != null && str11.equals(string)))
+                        && this.currentNotifTitle != null && !this.currentNotifTitle.isEmpty()
+                        && isLyricCandidate(this.currentNotifTitle, str12, string, string2)) {
+                    str11 = this.currentNotifTitle;
                 }
             }
-            sendMusicBroadcast(true, z, str2, str3, bitmapScaleBitmap, str, pendingIntent, j, position, lyric);
-        } catch (Throwable th2) {
-            Log.e(Settings.TAG, "Error reading media state", th2);
+            // fixed194: duration fallback for ALL music apps (user
+            // 2026-11-23 "QQ音乐flyme版有了，其他音乐平台没有了").
+            // The broadcast duration j5 comes from a deep branch
+            // (j4 <- j3) that may not run, leaving j5 = 0 ("--:--").
+            // Fall back to the DURATION read at the top (j2) and to
+            // the cached duration. This was inside the Flyme-only
+            // block in fixed189, so only Flyme got it; other
+            // platforms (QQ original, NetEase, Migu...) stayed
+            // "--:--". j2/currentMediaDuration are generic, not
+            // Flyme-specific, so the fallback is safe for all.
+            if (j5 <= 0 && j2 > 0) {
+                j5 = j2;
+            }
+            if (j5 <= 0 && this.currentMediaDuration > 0) {
+                j5 = this.currentMediaDuration;
+            }
+            // fixed181: network lyrics. Remember the package /
+            // intent so the 1s tick can re-send. If we know the
+            // song, trigger the LRCLIB fetch (guarded, once per
+            // song). If no local lyric was found, fall back to the
+            // network line at the current position.
+            this.netLyricTickPackage = str;
+            this.netLyricTickIntent = pendingIntent;
+            if (str12 != null && !str12.isEmpty()) {
+                maybeFetchNetworkLyrics(str12, string, j5);
+            }
+            if ((str11 == null || str11.isEmpty()) && str12 != null && !str12.isEmpty()) {
+                String netLine = netLyricLineAt(str12, string, j);
+                if (netLine != null) {
+                    str11 = netLine;
+                }
+            }
+            sendMusicBroadcast(true, z7, str12, string, bitmap2, str, pendingIntent, j5, j, str11);
+        } catch (Throwable th6) {
+            Log.e(Settings.TAG, "Error reading media state", th6);
         }
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
-    public void sendMusicBroadcast(boolean z, boolean z2, String str, String str2, Bitmap bitmap, String str3, PendingIntent pendingIntent, long j, long j2, String lyric) {
+    public void sendMusicBroadcast(boolean z, boolean z2, String str, String str2, Bitmap bitmap, String str3, PendingIntent pendingIntent, long j, long j2, String str4) {
         Intent intent = new Intent(Settings.ACTION_MUSIC);
         intent.setPackage(Settings.SYSTEMUI_PACKAGE);
         intent.putExtra(Settings.EXTRA_MUSIC_ACTIVE, z);
@@ -1818,8 +2596,11 @@ public class NotificationService extends NotificationListenerService {
         intent.putExtra(Settings.EXTRA_PACKAGE, str3);
         intent.putExtra(Settings.EXTRA_MUSIC_DURATION, j);
         intent.putExtra(Settings.EXTRA_MUSIC_POSITION, j2);
-        if (lyric != null) {
-            intent.putExtra(Settings.EXTRA_MUSIC_LYRIC, lyric);
+        if (str4 != null) {
+            intent.putExtra(Settings.EXTRA_MUSIC_LYRIC, str4);
+        }
+        if (this.currentFavorite != null) {
+            intent.putExtra(Settings.EXTRA_MUSIC_FAVORITE, this.currentFavorite.booleanValue());
         }
         if (bitmap != null) {
             intent.putExtra(Settings.EXTRA_MUSIC_ALBUM, bitmap);
@@ -1830,11 +2611,16 @@ public class NotificationService extends NotificationListenerService {
         sendBroadcast(intent);
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
     public void releaseMediaController() {
+        stopNetLyricTick();
+        this.netLyricLines = null;
+        this.netLyricSong = null;
+        this.netLyricArtist = null;
+        this.netLyricLastLine = null;
         MediaController mediaController = this.mediaController;
         this.mediaController = null;
         this.currentMediaKey = null;
+        this.currentFavorite = null;
         if (mediaController != null) {
             try {
                 if (this.mediaCallback != null) {
@@ -1846,41 +2632,136 @@ public class NotificationService extends NotificationListenerService {
         this.mediaCallback = null;
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
+    private boolean sendFavoriteAction() {
+        StatusBarNotification[] activeNotifications;
+        try {
+            if (this.currentMediaKey == null || (activeNotifications = getActiveNotifications()) == null) {
+                return false;
+            }
+            for (StatusBarNotification statusBarNotification : activeNotifications) {
+                if (statusBarNotification != null && statusBarNotification.getKey() != null && statusBarNotification.getKey().equals(this.currentMediaKey)) {
+                    Notification notification = statusBarNotification.getNotification();
+                    if (notification != null && notification.actions != null) {
+                        for (Notification.Action action : notification.actions) {
+                            if (action != null && action.title != null) {
+                                String lowerCase = action.title.toString().toLowerCase();
+                                if ((lowerCase.contains("收藏") || lowerCase.contains("喜欢") || lowerCase.contains("like") || lowerCase.contains(Settings.CONTROL_FAVORITE) || lowerCase.contains("favourite") || lowerCase.contains("heart") || lowerCase.contains("红心")) && action.actionIntent != null) {
+                                    action.actionIntent.send();
+                                    return true;
+                                }
+                            }
+                        }
+                        return false;
+                    }
+                    return false;
+                }
+            }
+        } catch (Throwable th) {
+            Log.e(Settings.TAG, "sendFavoriteAction failed", th);
+        }
+        return false;
+    }
+
+    private Boolean readFavoriteState(MediaMetadata mediaMetadata) {
+        StatusBarNotification[] activeNotifications;
+        if (mediaMetadata != null) {
+            try {
+                Rating rating = mediaMetadata.getRating("android.media.metadata.USER_RATING");
+                if (rating != null && rating.getRatingStyle() == 1) {
+                    return Boolean.valueOf(rating.hasHeart());
+                }
+            } catch (Throwable th) {
+            }
+        }
+        try {
+            if (this.currentMediaKey == null || (activeNotifications = getActiveNotifications()) == null) {
+                return null;
+            }
+            for (StatusBarNotification statusBarNotification : activeNotifications) {
+                if (statusBarNotification != null && statusBarNotification.getKey() != null && statusBarNotification.getKey().equals(this.currentMediaKey)) {
+                    Notification notification = statusBarNotification.getNotification();
+                    if (notification != null && notification.actions != null) {
+                        for (Notification.Action action : notification.actions) {
+                            if (action != null && action.title != null) {
+                                String string = action.title.toString();
+                                String lowerCase = string.toLowerCase();
+                                if (string.contains("收藏") || string.contains("喜欢") || lowerCase.contains("like") || lowerCase.contains(Settings.CONTROL_FAVORITE) || lowerCase.contains("favourite") || lowerCase.contains("heart") || string.contains("红心")) {
+                                    if (!string.contains("已收藏") && !string.contains("已喜欢") && !string.contains("取消收藏") && !string.contains("取消喜欢") && !string.contains("已加") && !lowerCase.contains("liked") && !lowerCase.contains("unlike")) {
+                                        return null;
+                                    }
+                                    return Boolean.TRUE;
+                                }
+                            }
+                        }
+                        return null;
+                    }
+                    return null;
+                }
+            }
+        } catch (Throwable th2) {
+        }
+        return null;
+    }
+
     public void handleMusicControl(String str, long j) {
         if (str == null) {
             return;
         }
         try {
             MediaController mediaController = this.mediaController;
-            if (mediaController != null && mediaController.getTransportControls() != null) {
-                if (Settings.CONTROL_TOGGLE.equals(str)) {
-                    PlaybackState playbackState = mediaController.getPlaybackState();
-                    boolean z = playbackState != null && playbackState.getState() == 3;
-                    if (z) {
-                        mediaController.getTransportControls().pause();
-                    } else {
-                        mediaController.getTransportControls().play();
-                    }
-                    Log.i(Settings.TAG, "Music control: toggle -> " + (z ? "pause" : "play"));
-                } else if (Settings.CONTROL_NEXT.equals(str)) {
-                    mediaController.getTransportControls().skipToNext();
-                    Log.i(Settings.TAG, "Music control: next");
-                } else if (Settings.CONTROL_PREV.equals(str)) {
-                    mediaController.getTransportControls().skipToPrevious();
-                    Log.i(Settings.TAG, "Music control: prev");
-                } else if (Settings.CONTROL_STOP.equals(str)) {
-                    mediaController.getTransportControls().stop();
-                    Log.i(Settings.TAG, "Music control: stop");
-                } else if (Settings.CONTROL_SEEK.equals(str) && j >= 0) {
-                    mediaController.getTransportControls().seekTo(j);
-                    Log.i(Settings.TAG, "Music control: seek to " + j);
-                }
+            if (mediaController == null || mediaController.getTransportControls() == null) {
+                Log.i(Settings.TAG, "Music control ignored, no active session: " + str);
                 return;
             }
-            Log.i(Settings.TAG, "Music control ignored, no active session: " + str);
-        } catch (Throwable th) {
-            Log.e(Settings.TAG, "Error handling music control " + str, th);
+            boolean z = true;
+            if (Settings.CONTROL_TOGGLE.equals(str)) {
+                PlaybackState playbackState = mediaController.getPlaybackState();
+                if (playbackState == null || playbackState.getState() != 3) {
+                    z = false;
+                }
+                if (z) {
+                    mediaController.getTransportControls().pause();
+                } else {
+                    mediaController.getTransportControls().play();
+                }
+                Log.i(Settings.TAG, "Music control: toggle -> " + (z ? "pause" : "play"));
+                return;
+            }
+            if (Settings.CONTROL_NEXT.equals(str)) {
+                mediaController.getTransportControls().skipToNext();
+                Log.i(Settings.TAG, "Music control: next");
+                return;
+            }
+            if (Settings.CONTROL_PREV.equals(str)) {
+                mediaController.getTransportControls().skipToPrevious();
+                Log.i(Settings.TAG, "Music control: prev");
+                return;
+            }
+            if (Settings.CONTROL_STOP.equals(str)) {
+                mediaController.getTransportControls().stop();
+                Log.i(Settings.TAG, "Music control: stop");
+                return;
+            }
+            if (Settings.CONTROL_FAVORITE.equals(str)) {
+                boolean zSendFavoriteAction = sendFavoriteAction();
+                if (!zSendFavoriteAction) {
+                    try {
+                        mediaController.getTransportControls().setRating(Rating.newHeartRating(true));
+                    } catch (Throwable th) {
+                        z = zSendFavoriteAction;
+                    }
+                } else {
+                    z = zSendFavoriteAction;
+                }
+                Log.i(Settings.TAG, "Music control: favorite -> " + z);
+                return;
+            }
+            if (Settings.CONTROL_SEEK.equals(str) && j >= 0) {
+                mediaController.getTransportControls().seekTo(j);
+                Log.i(Settings.TAG, "Music control: seek to " + j);
+            }
+        } catch (Throwable th2) {
+            Log.e(Settings.TAG, "Error handling music control " + str, th2);
         }
     }
 
@@ -1888,6 +2769,7 @@ public class NotificationService extends NotificationListenerService {
         IntentFilter intentFilter = new IntentFilter();
         intentFilter.addAction(Settings.ACTION_MUSIC_CONTROL);
         intentFilter.addAction(Settings.ACTION_DISMISS);
+        intentFilter.addAction(Settings.ACTION_CALL_CONTROL);
         try {
             Context.class.getMethod("registerReceiver", BroadcastReceiver.class, IntentFilter.class, Integer.TYPE).invoke(this, this.commandReceiver, intentFilter, 2);
             this.commandReceiverRegistered = true;
@@ -1904,77 +2786,63 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private static boolean isOngoing(Notification notification) {
-        // fixed81: a foreground-service notification (flag 32) is
-        // ongoing by definition — Amap posts its navigation
-        // notification that way and it was not always also flagged
-        // ongoing (flag 2), so the nav branch never matched and the
-        // live-nav bubble never appeared.
-        return (notification.flags & 2) != 0 || (notification.flags & 32) != 0;
+        return ((notification.flags & 2) == 0 && (notification.flags & 32) == 0) ? false : true;
     }
 
-    // fixed33: last non-empty line of android.textLines (InboxStyle /
-    // MessagingStyle notifications). The last line is the newest.
     private static String getLastTextLine(Bundle bundle) {
         if (bundle == null) {
             return null;
         }
         try {
-            CharSequence[] lines = bundle.getCharSequenceArray("android.textLines");
-            if (lines != null) {
-                for (int i = lines.length - 1; i >= 0; i--) {
-                    if (lines[i] != null && !lines[i].toString().trim().isEmpty()) {
-                        return lines[i].toString();
+            CharSequence[] charSequenceArray = bundle.getCharSequenceArray("android.textLines");
+            if (charSequenceArray != null) {
+                for (int length = charSequenceArray.length - 1; length >= 0; length--) {
+                    if (charSequenceArray[length] != null && !charSequenceArray[length].toString().trim().isEmpty()) {
+                        return charSequenceArray[length].toString();
                     }
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable th) {
         }
         return null;
     }
 
-    // fixed33: text of the latest android.messages entry
-    // (Notification.MessagingStyle.Message). The last entry is newest.
-    // Message does not declare Parcelable in android-34.jar, so a direct
-    // instanceof/cast does not compile — read getText() by reflection.
     private static String getLatestMessageText(Bundle bundle) {
         if (bundle == null) {
             return null;
         }
         try {
-            android.os.Parcelable[] messages = bundle.getParcelableArray("android.messages");
-            if (messages != null) {
-                for (int i = messages.length - 1; i >= 0; i--) {
-                    Object msg = messages[i];
-                    if (msg == null) {
-                        continue;
-                    }
-                    if ("android.app.Notification$MessagingStyle$Message".equals(msg.getClass().getName())) {
+            Parcelable[] parcelableArray = bundle.getParcelableArray("android.messages");
+            if (parcelableArray != null) {
+                for (int length = parcelableArray.length - 1; length >= 0; length--) {
+                    Parcelable parcelable = parcelableArray[length];
+                    if (parcelable != null && "android.app.Notification$MessagingStyle$Message".equals(parcelable.getClass().getName())) {
                         try {
-                            java.lang.reflect.Method getText = msg.getClass().getMethod("getText");
-                            Object t = getText.invoke(msg);
-                            if (t instanceof CharSequence && !t.toString().trim().isEmpty()) {
-                                return t.toString();
+                            Object objInvoke = parcelable.getClass().getMethod("getText", new Class[0]).invoke(parcelable, new Object[0]);
+                            if ((objInvoke instanceof CharSequence) && !objInvoke.toString().trim().isEmpty()) {
+                                return objInvoke.toString();
                             }
-                        } catch (Throwable ignored) {
+                        } catch (Throwable th) {
                         }
                     }
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable th2) {
         }
         return null;
     }
 
-    private static String getText(Bundle bundle, String str) {
+    /* JADX INFO: Access modifiers changed from: private */
+    public static String getText(Bundle bundle, String str) {
         if (bundle == null) {
             return null;
         }
         try {
             CharSequence charSequence = bundle.getCharSequence(str);
-            if (charSequence != null) {
-                return charSequence.toString();
+            if (charSequence == null) {
+                return null;
             }
-            return null;
+            return charSequence.toString();
         } catch (Throwable th) {
             return null;
         }
@@ -1990,313 +2858,291 @@ public class NotificationService extends NotificationListenerService {
     }
 
     private IconResult extractIcon(Notification notification, String str) {
+        Drawable applicationIcon;
         Drawable drawableLoadDrawable;
-        // fixed13: the target app's own Context first — it inflates the
-        // icon with the correct theme/resources.
-        Bitmap pkgCtxBitmap = appIconViaPackageContext(str);
-        if (pkgCtxBitmap != null && !isBadIconBitmap(pkgCtxBitmap)) {
+        Bitmap bitmapAppIconViaPackageContext = appIconViaPackageContext(str);
+        if (bitmapAppIconViaPackageContext != null && !isBadIconBitmap(bitmapAppIconViaPackageContext)) {
             IconResult iconResult = new IconResult();
-            iconResult.bitmap = pkgCtxBitmap;
+            iconResult.bitmap = bitmapAppIconViaPackageContext;
             return iconResult;
         }
         Log.i(Settings.TAG, "PackageContext icon bad/blank for " + str + ", trying resources");
-        // fixed11: decode the icon straight from the app's own resources.
-        // BitmapFactory.decodeResource gives the raw PNG bitmap and
-        // bypasses Drawable rendering entirely — the Canvas re-draw is what
-        // kept turning the icon white on this device.
-        Bitmap resBitmap = appIconBitmapFromResources(str);
-        if (resBitmap != null && !isBadIconBitmap(resBitmap)) {
-            IconResult iconResult = new IconResult();
-            iconResult.bitmap = resBitmap;
-            return iconResult;
+        Bitmap bitmapAppIconBitmapFromResources = appIconBitmapFromResources(str);
+        if (bitmapAppIconBitmapFromResources != null && !isBadIconBitmap(bitmapAppIconBitmapFromResources)) {
+            IconResult iconResult2 = new IconResult();
+            iconResult2.bitmap = bitmapAppIconBitmapFromResources;
+            return iconResult2;
         }
-        Bitmap launcherBitmap = launcherIconBitmap(str);
-        if (launcherBitmap != null && !isBadIconBitmap(launcherBitmap)) {
-            IconResult iconResult = new IconResult();
-            iconResult.bitmap = launcherBitmap;
-            return iconResult;
+        Bitmap bitmapLauncherIconBitmap = launcherIconBitmap(str);
+        if (bitmapLauncherIconBitmap != null && !isBadIconBitmap(bitmapLauncherIconBitmap)) {
+            IconResult iconResult3 = new IconResult();
+            iconResult3.bitmap = bitmapLauncherIconBitmap;
+            return iconResult3;
         }
-        Drawable applicationIcon = null;
         try {
             applicationIcon = getPackageManager().getApplicationIcon(str);
         } catch (Throwable th) {
+            applicationIcon = null;
         }
         if (applicationIcon != null) {
-            Bitmap appBitmap = drawableToBitmap(applicationIcon);
-            if (appBitmap != null && !isBadIconBitmap(appBitmap)) {
-                IconResult iconResult2 = new IconResult();
-                iconResult2.bitmap = appBitmap;
-                return iconResult2;
+            Bitmap bitmapDrawableToBitmap = drawableToBitmap(applicationIcon);
+            if (bitmapDrawableToBitmap != null && !isBadIconBitmap(bitmapDrawableToBitmap)) {
+                IconResult iconResult4 = new IconResult();
+                iconResult4.bitmap = bitmapDrawableToBitmap;
+                return iconResult4;
             }
             Log.i(Settings.TAG, "App icon blank/white, falling back to small icon: " + str);
         }
         try {
             if (notification.getSmallIcon() != null && (drawableLoadDrawable = notification.getSmallIcon().loadDrawable(this)) != null) {
-                android.graphics.Bitmap smallBitmap = drawableToBitmap(drawableLoadDrawable);
-                if (smallBitmap != null && !isBadIconBitmap(smallBitmap)) {
-                    IconResult iconResult3 = new IconResult();
-                    iconResult3.bitmap = smallBitmap;
-                    iconResult3.small = true;
-                    iconResult3.accent = notification.color;
-                    return iconResult3;
+                Bitmap bitmapDrawableToBitmap2 = drawableToBitmap(drawableLoadDrawable);
+                if (bitmapDrawableToBitmap2 != null && !isBadIconBitmap(bitmapDrawableToBitmap2)) {
+                    IconResult iconResult5 = new IconResult();
+                    iconResult5.bitmap = bitmapDrawableToBitmap2;
+                    iconResult5.small = true;
+                    iconResult5.accent = notification.color;
+                    return iconResult5;
                 }
                 Log.i(Settings.TAG, "Small icon bad/white for " + str + ", using placeholder");
             }
-        } catch (Throwable th) {
+        } catch (Throwable th2) {
         }
         return null;
     }
 
-    // fixed13: load the icon with the TARGET app's own Context. Drawables
-    // (especially VectorDrawable foregrounds inside an AdaptiveIconDrawable)
-    // need the owning app's theme/resources to inflate correctly; loading
-    // them with this service's own Context is what kept producing a blank
-    // or white bitmap on this device.
-    private Bitmap appIconViaPackageContext(String pkg) {
+    private Bitmap appIconViaPackageContext(String str) {
         try {
-            android.content.Context pkgCtx = createPackageContext(pkg, Context.CONTEXT_IGNORE_SECURITY | Context.CONTEXT_INCLUDE_CODE);
-            if (pkgCtx == null) {
+            Context contextCreatePackageContext = createPackageContext(str, 3);
+            if (contextCreatePackageContext == null) {
                 return null;
             }
-            android.graphics.drawable.Drawable d = pkgCtx.getPackageManager().getApplicationIcon(pkg);
-            return drawableToBitmap(d);
+            return drawableToBitmap(contextCreatePackageContext.getPackageManager().getApplicationIcon(str));
         } catch (Throwable th) {
-            Log.i(Settings.TAG, "PackageContext icon failed: " + pkg + " " + th);
+            Log.i(Settings.TAG, "PackageContext icon failed: " + str + " " + String.valueOf(th));
             return null;
         }
     }
 
-    // fixed11: read the app icon resource directly and decode the PNG with
-    // BitmapFactory, so no Drawable has to be drawn on a Canvas at all.
-    private Bitmap appIconBitmapFromResources(String pkg) {
+    private Bitmap appIconBitmapFromResources(String str) {
         try {
-            android.content.pm.ApplicationInfo appInfo = getPackageManager().getApplicationInfo(pkg, 0);
-            if (appInfo == null || appInfo.icon == 0) {
-                return null;
-            }
-            android.content.res.Resources res = getPackageManager().getResourcesForApplication(pkg);
-            try {
-                android.graphics.Bitmap bmp = android.graphics.BitmapFactory.decodeResource(res, appInfo.icon);
-                if (bmp != null) {
-                    return bmp;
+            ApplicationInfo applicationInfo = getPackageManager().getApplicationInfo(str, 0);
+            if (applicationInfo != null && applicationInfo.icon != 0) {
+                Resources resourcesForApplication = getPackageManager().getResourcesForApplication(str);
+                try {
+                    Bitmap bitmapDecodeResource = BitmapFactory.decodeResource(resourcesForApplication, applicationInfo.icon);
+                    if (bitmapDecodeResource != null) {
+                        return bitmapDecodeResource;
+                    }
+                } catch (Throwable th) {
                 }
-            } catch (Throwable th) {
+                try {
+                    return drawableToBitmap(resourcesForApplication.getDrawable(applicationInfo.icon, null));
+                } catch (Throwable th2) {
+                    return null;
+                }
             }
-            try {
-                android.graphics.drawable.Drawable d = res.getDrawable(appInfo.icon, null);
-                return drawableToBitmap(d);
-            } catch (Throwable th) {
-            }
-        } catch (Throwable th) {
+            return null;
+        } catch (Throwable th3) {
         }
         return null;
     }
 
-    private Bitmap launcherIconBitmap(String pkg) {
+    private Bitmap launcherIconBitmap(String str) {
+        List<LauncherActivityInfo> activityList;
         try {
-            android.content.pm.LauncherApps launcherApps = (android.content.pm.LauncherApps) getSystemService(Context.LAUNCHER_APPS_SERVICE);
-            if (launcherApps == null) {
-                return null;
+            LauncherApps launcherApps = (LauncherApps) getSystemService("launcherapps");
+            if (launcherApps != null && (activityList = launcherApps.getActivityList(str, Process.myUserHandle())) != null && !activityList.isEmpty()) {
+                return drawableToBitmap(activityList.get(0).getIcon(0));
             }
-            java.util.List<android.content.pm.LauncherActivityInfo> activities = launcherApps.getActivityList(pkg, android.os.Process.myUserHandle());
-            if (activities == null || activities.isEmpty()) {
-                return null;
-            }
-            Drawable icon = activities.get(0).getIcon(0);
-            return drawableToBitmap(icon);
+            return null;
         } catch (Throwable th) {
             return null;
         }
     }
 
-    // fixed10: bad icon = blank (mostly transparent) OR mostly white. A white
-    // bitmap is opaque so the blank check passes it, yet it renders as the
-    // white circle in the screenshot — the adaptive background did not draw.
     private static boolean isBadIconBitmap(Bitmap bitmap) {
         if (bitmap == null) {
             return true;
         }
-        int w = bitmap.getWidth();
-        int h = bitmap.getHeight();
-        if (w <= 0 || h <= 0) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        if (width <= 0 || height <= 0) {
             return true;
         }
-        int stepX = Math.max(1, w / 8);
-        int stepY = Math.max(1, h / 8);
-        int opaque = 0;
-        int white = 0;
-        int total = 0;
-        for (int y = 0; y < h; y += stepY) {
-            for (int x = 0; x < w; x += stepX) {
-                int p = bitmap.getPixel(x, y);
-                total++;
-                int a = (p >>> 24) & 0xFF;
-                if (a >= 128) {
-                    opaque++;
-                    int r = (p >> 16) & 0xFF;
-                    int g = (p >> 8) & 0xFF;
-                    int b = p & 0xFF;
-                    if (r > 240 && g > 240 && b > 240) {
-                        white++;
+        int iMax = Math.max(1, width / 8);
+        int iMax2 = Math.max(1, height / 8);
+        int i = 0;
+        int i2 = 0;
+        int i3 = 0;
+        for (int i4 = 0; i4 < height; i4 += iMax2) {
+            for (int i5 = 0; i5 < width; i5 += iMax) {
+                int pixel = bitmap.getPixel(i5, i4);
+                i++;
+                if (((pixel >>> 24) & 255) >= 128) {
+                    i2++;
+                    int i6 = (pixel >> 16) & 255;
+                    int i7 = (pixel >> 8) & 255;
+                    int i8 = pixel & 255;
+                    if (i6 > 240 && i7 > 240 && i8 > 240) {
+                        i3++;
                     }
                 }
             }
         }
-        if (total == 0 || opaque * 10 < total) {
+        if (i == 0 || i2 * 10 < i || i3 * 10 > i2 * 9) {
             return true;
         }
-        return white * 10 > opaque * 9;
+        return false;
     }
 
-    // fixed9: blank = mostly transparent (no real content drawn). A solid
-    // color is NOT blank — WeChat's green is a real icon.
     private static boolean isBlankBitmap(Bitmap bitmap) {
         if (bitmap == null) {
             return true;
         }
-        int w = bitmap.getWidth();
-        int h = bitmap.getHeight();
-        if (w <= 0 || h <= 0) {
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        if (width <= 0 || height <= 0) {
             return true;
         }
-        int stepX = Math.max(1, w / 8);
-        int stepY = Math.max(1, h / 8);
-        int opaque = 0;
-        int total = 0;
-        for (int y = 0; y < h; y += stepY) {
-            for (int x = 0; x < w; x += stepX) {
-                int p = bitmap.getPixel(x, y);
-                total++;
-                if (((p >>> 24) & 0xFF) >= 128) {
-                    opaque++;
+        int iMax = Math.max(1, width / 8);
+        int iMax2 = Math.max(1, height / 8);
+        int i = 0;
+        int i2 = 0;
+        for (int i3 = 0; i3 < height; i3 += iMax2) {
+            for (int i4 = 0; i4 < width; i4 += iMax) {
+                i++;
+                if (((bitmap.getPixel(i4, i3) >>> 24) & 255) >= 128) {
+                    i2++;
                 }
             }
         }
-        return total == 0 || opaque * 10 < total;
+        if (i == 0 || i2 * 10 < i) {
+            return true;
+        }
+        return false;
     }
 
     private static boolean isSolidColorBitmap(Bitmap bitmap) {
-        if (bitmap == null) {
+        Bitmap bitmap2 = bitmap;
+        int i = 0;
+        if (bitmap2 == null) {
             return false;
         }
-        int w = bitmap.getWidth();
-        int h = bitmap.getHeight();
-        if (w <= 0 || h <= 0) {
-            return true;
-        }
-        int stepX = Math.max(1, w / 8);
-        int stepY = Math.max(1, h / 8);
-        boolean hasFirst = false;
-        int firstR = 0;
-        int firstG = 0;
-        int firstB = 0;
-        int diffSum = 0;
-        int count = 0;
-        long sumR = 0;
-        long sumG = 0;
-        long sumB = 0;
-        java.util.HashSet<Integer> distinct = new java.util.HashSet<Integer>();
-        for (int y = 0; y < h; y += stepY) {
-            for (int x = 0; x < w; x += stepX) {
-                int p = bitmap.getPixel(x, y);
-                if (((p >>> 24) & 0xFF) < 128) {
-                    continue;
+        int width = bitmap.getWidth();
+        int height = bitmap.getHeight();
+        if (width > 0 && height > 0) {
+            int iMax = Math.max(1, width / 8);
+            int iMax2 = Math.max(1, height / 8);
+            HashSet hashSet = new HashSet();
+            long j = 0;
+            int i2 = 0;
+            boolean z = false;
+            int i3 = 0;
+            int i4 = 0;
+            int i5 = 0;
+            int iAbs = 0;
+            long j2 = 0;
+            long j3 = 0;
+            while (i2 < height) {
+                int i6 = 0;
+                while (i6 < width) {
+                    int i7 = width;
+                    int pixel = bitmap2.getPixel(i6, i2);
+                    int i8 = height;
+                    if (((pixel >>> 24) & 255) >= 128) {
+                        if (!z) {
+                            i3 = (pixel >> 16) & 255;
+                            i4 = (pixel >> 8) & 255;
+                            i5 = pixel & 255;
+                            z = true;
+                        }
+                        int i9 = (pixel >> 16) & 255;
+                        int i10 = (pixel >> 8) & 255;
+                        j2 += (long) i10;
+                        int i11 = pixel & 255;
+                        j3 += (long) i11;
+                        iAbs += Math.abs(i9 - i3) + Math.abs(i10 - i4) + Math.abs(i11 - i5);
+                        hashSet.add(Integer.valueOf(((i9 / 16) << 8) | ((i10 / 16) << 4) | (i11 / 16)));
+                        i++;
+                        z = z;
+                        j += (long) i9;
+                    }
+                    i6 += iMax;
+                    bitmap2 = bitmap;
+                    i2 = i2;
+                    width = i7;
+                    height = i8;
                 }
-                if (!hasFirst) {
-                    firstR = (p >> 16) & 0xFF;
-                    firstG = (p >> 8) & 0xFF;
-                    firstB = p & 0xFF;
-                    hasFirst = true;
-                }
-                sumR += (p >> 16) & 0xFF;
-                sumG += (p >> 8) & 0xFF;
-                sumB += p & 0xFF;
-                diffSum += Math.abs(((p >> 16) & 0xFF) - firstR)
-                        + Math.abs(((p >> 8) & 0xFF) - firstG)
-                        + Math.abs((p & 0xFF) - firstB);
-                distinct.add((((p >> 16) & 0xFF) / 16 << 8) | (((p >> 8) & 0xFF) / 16 << 4) | ((p & 0xFF) / 16));
-                count++;
+                i2 += iMax2;
+                bitmap2 = bitmap;
+                height = height;
             }
-        }
-        if (!hasFirst || count == 0) {
+            if (!z || i == 0 || hashSet.size() <= 5) {
+                return true;
+            }
+            long j4 = i;
+            int i12 = (int) (j / j4);
+            int i13 = (int) (j2 / j4);
+            int i14 = (int) (j3 / j4);
+            if (i12 <= 235 || i13 <= 235 || i14 <= 235) {
+                return (i12 < 20 && i13 < 20 && i14 < 20) || iAbs / i < 24;
+            }
             return true;
         }
-        if (distinct.size() <= 5) {
-            return true;
-        }
-        // fixed6: a near-white or near-black image is a placeholder avatar
-        // (e.g. QQ group default avatar renders as a pure white square),
-        // even if it carries a faint watermark that defeats the color count.
-        int avgR = (int) (sumR / count);
-        int avgG = (int) (sumG / count);
-        int avgB = (int) (sumB / count);
-        if ((avgR > 235 && avgG > 235 && avgB > 235) || (avgR < 20 && avgG < 20 && avgB < 20)) {
-            return true;
-        }
-        return (diffSum / count) < 24;
+        return true;
     }
 
     private Bitmap drawableToBitmap(Drawable drawable) {
         if (drawable == null) {
             return null;
         }
-        // fixed11: if it is already a bitmap, take the original bitmap
-        // directly — re-drawing it on a Canvas can only lose information.
-        // This is the common case for a plain PNG launcher icon.
-        if (drawable instanceof android.graphics.drawable.BitmapDrawable) {
+        if (drawable instanceof BitmapDrawable) {
             try {
-                android.graphics.Bitmap bmp = ((android.graphics.drawable.BitmapDrawable) drawable).getBitmap();
-                if (bmp != null && !bmp.isRecycled()) {
-                    return bmp;
+                Bitmap bitmap = ((BitmapDrawable) drawable).getBitmap();
+                if (bitmap != null && !bitmap.isRecycled()) {
+                    return bitmap;
                 }
             } catch (Throwable th) {
             }
         }
-        // fixed9: AdaptiveIconDrawable (what getApplicationIcon returns for
-        // most apps now) reports -1 for intrinsic size and draws its layers
-        // with a safe-zone inset. Try drawing background + foreground
-        // explicitly first; if that comes out blank (a layer failed to draw),
-        // let the drawable draw itself, which composites the layers with
-        // the safe-zone inset. Return whichever is not blank.
-        if (drawable instanceof android.graphics.drawable.AdaptiveIconDrawable) {
-            android.graphics.drawable.AdaptiveIconDrawable adaptive = (android.graphics.drawable.AdaptiveIconDrawable) drawable;
-            int size = 192;
-            Bitmap bitmap = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-            Canvas canvas = new Canvas(bitmap);
+        if (drawable instanceof AdaptiveIconDrawable) {
+            AdaptiveIconDrawable adaptiveIconDrawable = (AdaptiveIconDrawable) drawable;
+            Bitmap bitmapCreateBitmap = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888);
+            Canvas canvas = new Canvas(bitmapCreateBitmap);
             try {
-                Drawable bg = adaptive.getBackground();
-                if (bg != null) {
-                    bg.setBounds(0, 0, size, size);
-                    bg.draw(canvas);
+                Drawable background = adaptiveIconDrawable.getBackground();
+                if (background != null) {
+                    background.setBounds(0, 0, 192, 192);
+                    background.draw(canvas);
                 }
-            } catch (Throwable th) {
+            } catch (Throwable th2) {
             }
             try {
-                Drawable fg = adaptive.getForeground();
-                if (fg != null) {
-                    fg.setBounds(0, 0, size, size);
-                    fg.draw(canvas);
+                Drawable foreground = adaptiveIconDrawable.getForeground();
+                if (foreground != null) {
+                    foreground.setBounds(0, 0, 192, 192);
+                    foreground.draw(canvas);
                 }
-            } catch (Throwable th) {
+            } catch (Throwable th3) {
             }
-            if (!isBadIconBitmap(bitmap)) {
-                return bitmap;
+            if (!isBadIconBitmap(bitmapCreateBitmap)) {
+                return bitmapCreateBitmap;
             }
-            Bitmap bitmap2 = Bitmap.createBitmap(size, size, Bitmap.Config.ARGB_8888);
-            Canvas canvas2 = new Canvas(bitmap2);
+            Bitmap bitmapCreateBitmap2 = Bitmap.createBitmap(192, 192, Bitmap.Config.ARGB_8888);
+            Canvas canvas2 = new Canvas(bitmapCreateBitmap2);
             try {
-                adaptive.setBounds(0, 0, size, size);
-                adaptive.draw(canvas2);
-            } catch (Throwable th) {
+                adaptiveIconDrawable.setBounds(0, 0, 192, 192);
+                adaptiveIconDrawable.draw(canvas2);
+            } catch (Throwable th4) {
             }
-            return bitmap2;
+            return bitmapCreateBitmap2;
         }
         int iMin = Math.min(Math.max(drawable.getIntrinsicWidth() > 0 ? drawable.getIntrinsicWidth() : 96, drawable.getIntrinsicHeight() > 0 ? drawable.getIntrinsicHeight() : 96), 192);
-        Bitmap bitmapCreateBitmap = Bitmap.createBitmap(iMin, iMin, Bitmap.Config.ARGB_8888);
-        Canvas canvas = new Canvas(bitmapCreateBitmap);
+        Bitmap bitmapCreateBitmap3 = Bitmap.createBitmap(iMin, iMin, Bitmap.Config.ARGB_8888);
+        Canvas canvas3 = new Canvas(bitmapCreateBitmap3);
         drawable.setBounds(0, 0, iMin, iMin);
-        drawable.draw(canvas);
-        return bitmapCreateBitmap;
+        drawable.draw(canvas3);
+        return bitmapCreateBitmap3;
     }
 
     private static Bitmap scaleBitmap(Bitmap bitmap, int i) {
@@ -2308,5 +3154,337 @@ public class NotificationService extends NotificationListenerService {
         }
         float f = i / iMax;
         return Bitmap.createScaledBitmap(bitmap, Math.max(1, Math.round(width * f)), Math.max(1, Math.round(height * f)), true);
+    }
+
+    // ---- fixed206: independent download window ----
+    // fixed199: 2.0 start/stopDownloadTick (idempotent per
+    // key — re-posts of the same download re-arm the same
+    // runnable instead of stacking ticks).
+
+
+
+    // fixed193: does the live title/text say the download is
+    // done? (2.0 v242). Apps rewrite the notification as "下载完成"
+    // (and drop the progress extras) instead of posting 100%.
+
+    // fixed199: download tick rewritten the 2.0 way (2.0
+
+    // fixed209: is this a download-related notification?
+    // Title/text mentions download, install or update.
+
+    // fixed208: strip a trailing " 18%" / "18%" so "正在安装"
+    // and "正在安装 18%" compare equal (same download).
+
+    // fixed206: send one download state to SystemUI.
+
+
+
+
+
+
+
+
+
+
+
+
+
+    // fixed190: download capsule uses 2.0's dual condition
+    // (v110/v241). A download needs BOTH real progress AND a
+    // download signal. Pure-progress checks mis-detected chat
+    // messages with stale progress extras as downloads.
+
+
+
+
+    // fixed212: download detection (ported from 2.0 dual condition).
+    private static int parseProgressPercent(String str) {
+        if (str == null || str.isEmpty()) {
+            return -1;
+        }
+        try {
+            Matcher matcher = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*%").matcher(str);
+            if (matcher.find()) {
+                float f = Float.parseFloat(matcher.group(1));
+                if (f >= 0.0f && f <= 100.0f) {
+                    return Math.round(f);
+                }
+            }
+            Matcher matcher2 = Pattern.compile("(\\d+(?:\\.\\d+)?)\\s*(?:MB|KB|GB|B)?\\s*/\\s*(\\d+(?:\\.\\d+)?)\\s*(?:MB|KB|GB|B)?").matcher(str);
+            if (matcher2.find()) {
+                float f2 = Float.parseFloat(matcher2.group(1));
+                float f3 = Float.parseFloat(matcher2.group(2));
+                if (f3 > 0.0f && f2 >= 0.0f && f2 <= f3) {
+                    return Math.round((f2 * 100.0f) / f3);
+                }
+            }
+        } catch (Throwable th) {
+        }
+        return -1;
+    }
+
+    private static int readDownloadPct(Notification n, String title, String text, String infoText) {
+        if (n == null) {
+            return -1;
+        }
+        long best = -1;
+        Bundle b = n.extras;
+        if (b != null) {
+            long prog = b.getInt(Notification.EXTRA_PROGRESS, 0);
+            long progMax = b.getInt(Notification.EXTRA_PROGRESS_MAX, 0);
+            if (progMax > 0) {
+                best = (prog * 100L) / progMax;
+            }
+        }
+        int[] rv = readProgressFromRemoteViews(n);
+        if (rv != null && rv[1] > 0) {
+            long rvPct = ((long) rv[0] * 100L) / rv[1];
+            if (rvPct > best) {
+                best = rvPct;
+            }
+        }
+        int textPct = parseProgressPercent(text);
+        if (textPct < 0) {
+            textPct = parseProgressPercent(title);
+        }
+        if (textPct > best) {
+            best = textPct;
+        }
+        long[] dl = parseDownloadedTotal(text, infoText);
+        if (dl != null && dl[1] > 0) {
+            long bytePct = (dl[0] * 100L) / dl[1];
+            if (bytePct > best) {
+                best = bytePct;
+            }
+        }
+        long[] bytes = readDownloadBytes(n);
+        if (bytes != null && bytes[1] > 0) {
+            long bytePct = (bytes[0] * 100L) / bytes[1];
+            if (bytePct > best) {
+                best = bytePct;
+            }
+        }
+        if (best < 0) {
+            return -1;
+        }
+        if (best > 100) {
+            best = 100;
+        }
+        return (int) best;
+    }
+
+    private static int[] readProgressFromRemoteViews(Notification notification) {
+        try {
+            RemoteViews remoteViews = notification.contentView;
+            if (remoteViews == null) {
+                remoteViews = notification.bigContentView;
+            }
+            if (remoteViews == null) {
+                return null;
+            }
+            Field declaredField = RemoteViews.class.getDeclaredField("mActions");
+            declaredField.setAccessible(true);
+            ArrayList arrayList = (ArrayList) declaredField.get(remoteViews);
+            if (arrayList == null) {
+                return null;
+            }
+            int iIntValue = -1;
+            int iIntValue2 = -1;
+            for (Object obj : arrayList) {
+                if (obj != null) {
+                    Class<?> cls = obj.getClass();
+                    if (cls.getSimpleName().equals("ReflectionAction")) {
+                        Field declaredField2 = cls.getDeclaredField("methodName");
+                        declaredField2.setAccessible(true);
+                        String str = (String) declaredField2.get(obj);
+                        Field declaredField3 = cls.getDeclaredField("value");
+                        declaredField3.setAccessible(true);
+                        Object obj2 = declaredField3.get(obj);
+                        if ("setMax".equals(str) && (obj2 instanceof Number)) {
+                            iIntValue = ((Number) obj2).intValue();
+                        } else if ("setProgress".equals(str) && (obj2 instanceof Number)) {
+                            iIntValue2 = ((Number) obj2).intValue();
+                        }
+                    }
+                }
+            }
+            if (iIntValue > 0 && iIntValue2 >= 0) {
+                return new int[]{iIntValue2, iIntValue};
+            }
+        } catch (Throwable th) {
+        }
+        return null;
+    }
+
+    private static boolean hasDownloadSignal(String pkg, String channelId,
+            String title, String text) {
+        // v241: 安装 no longer excluded — app-store install
+        // progress is a download capsule too. The signal gate
+        // below still blocks a stray 安装 from a non-store app.
+        if (containsAny(title, "上传", "备份", "同步")
+                || containsAny(text, "上传", "备份", "同步")) {
+            return false;
+        }
+        if (containsAny(title, "下载") || containsAny(text, "下载")) {
+            return true;
+        }
+        if (channelId != null
+                && channelId.toLowerCase(java.util.Locale.US).contains("download")) {
+            return true;
+        }
+        return pkg != null && isDownloaderPkg(pkg);
+    }
+
+    private static boolean isDownloaderPkg(String pkg) {
+        if (pkg.equals("com.meizu.mstore")
+                || pkg.equals("com.xiaomi.market")
+                || pkg.equals("com.huawei.appmarket")
+                || pkg.equals("com.oppo.market")
+                || pkg.equals("com.vivo.appstore")
+                || pkg.equals("com.bbk.appstore")
+                || pkg.equals("com.tencent.android.qqdownloader")
+                || pkg.equals("com.android.vending")) {
+            return true;
+        }
+        if (pkg.equals("com.android.browser")
+                || pkg.equals("com.UCMobile")
+                || pkg.equals("com.tencent.mtt")
+                || pkg.equals("com.baidu.searchbox")
+                || pkg.equals("org.mozilla.firefox")
+                || pkg.equals("com.microsoft.emmx")
+                || pkg.equals("com.quark.browser")) {
+            return true;
+        }
+        String lower = pkg.toLowerCase();
+        return lower.contains("download") || lower.contains("downloader");
+    }
+
+    private static boolean containsAny(String s, String... words) {
+        if (s == null) {
+            return false;
+        }
+        for (String w : words) {
+            if (w != null && s.contains(w)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static long[] parseDownloadedTotal(String text, String infoText) {
+        if (infoText != null) {
+            String str = infoText.trim();
+            int slash = str.indexOf('/');
+            if (slash > 0 && slash < str.length() - 1) {
+                long dl = parseSizeToBytes(str.substring(0, slash).trim());
+                long total = parseSizeToBytes(str.substring(slash + 1).trim());
+                if (dl >= 0 && total > 0) {
+                    return new long[]{dl, total};
+                }
+            }
+        }
+        if (text != null) {
+            String str = text.trim();
+            int a = str.indexOf("已下载");
+            int b = str.indexOf("，共", a >= 0 ? a : 0);
+            if (b < 0) {
+                b = str.indexOf(",共", a >= 0 ? a : 0);
+            }
+            if (a >= 0 && b > a) {
+                long dl = parseSizeToBytes(str.substring(a + 3, b).trim());
+                long total = parseSizeToBytes(str.substring(b + 2).trim());
+                if (dl >= 0 && total > 0) {
+                    return new long[]{dl, total};
+                }
+            }
+        }
+        return null;
+    }
+
+    private static long[] readDownloadBytes(Notification n) {
+        if (n == null) {
+            return null;
+        }
+        Bundle b = n.extras;
+        if (b != null) {
+            long prog = b.getInt(Notification.EXTRA_PROGRESS, 0);
+            long progMax = b.getInt(Notification.EXTRA_PROGRESS_MAX, 0);
+            if (progMax > 100 && prog >= 0) {
+                return new long[]{prog, progMax};
+            }
+        }
+        int[] rv = readProgressFromRemoteViews(n);
+        if (rv != null && rv[1] > 100 && rv[0] >= 0) {
+            return new long[]{rv[0], rv[1]};
+        }
+        return null;
+    }
+
+    private static long parseSizeToBytes(String str) {
+        if (str == null) {
+            return -1;
+        }
+        String t = str.trim().toUpperCase(java.util.Locale.US);
+        if (t.isEmpty()) {
+            return -1;
+        }
+        long mult = 1;
+        if (t.endsWith("GB") || t.endsWith("G")) {
+            mult = 1024L * 1024L * 1024L;
+            t = t.replaceAll("(GB|G)$", "").trim();
+        } else if (t.endsWith("MB") || t.endsWith("M")) {
+            mult = 1024L * 1024L;
+            t = t.replaceAll("(MB|M)$", "").trim();
+        } else if (t.endsWith("KB") || t.endsWith("K")) {
+            mult = 1024L;
+            t = t.replaceAll("(KB|K)$", "").trim();
+        } else if (t.endsWith("B")) {
+            t = t.substring(0, t.length() - 1).trim();
+        }
+        try {
+            double v = Double.parseDouble(t);
+            if (v < 0) {
+                return -1;
+            }
+            return (long) (v * mult);
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    // fixed215: listener log forwarding (fixed200/fixed204).
+    // Explicit package — an implicit broadcast is dropped.
+    private void sendLogLine(String line) {
+        try {
+            android.content.Intent it = new android.content.Intent(Settings.ACTION_LOG);
+            it.putExtra("line", line);
+            it.setPackage(Settings.SYSTEMUI_PACKAGE);
+            sendBroadcast(it);
+        } catch (Throwable ignored) {
+        }
+    }
+
+    // fixed219: download completion (2.0 v242, fixed193). Apps
+    // rewrite the notification as "下载完成" (and drop the
+    // progress extras) instead of posting 100%.
+    private static boolean isDownloadComplete(String title, String text) {
+        return (title != null
+                && (title.contains("下载完成")
+                        || title.contains("安装完成")
+                        || title.contains("已完成")
+                        || title.contains("下载完毕")
+                        || title.contains("已下载")
+                        || title.contains("下载成功")
+                        || title.toLowerCase(java.util.Locale.ROOT)
+                                .contains("download complete")))
+                || (text != null
+                        && (text.contains("下载完成")
+                                || text.contains("安装完成")
+                                || text.contains("已完成")
+                                || text.contains("下载完毕")
+                                || text.contains("已下载")
+                                || text.contains("下载成功")
+                                || text.toLowerCase(java.util.Locale.ROOT)
+                                        .contains("download complete")));
     }
 }

@@ -1,235 +1,489 @@
 package com.jarvis.bubblenotify;
 
-/**
- * Minimal SVG pathData parser (commands M/m L/l H/h V/v C/c S/s Q/q T/t A/a Z/z,
- * absolute and relative). Pure Java with no Android dependency, so the parsing
- * and arc conversion can be unit-tested on the JVM.
- *
- * <p>IconView feeds the commands into android.graphics.Path through the sink.
- * VectorIcons stores its icons as 24x24 viewport pathData, so the parsed
- * coordinates are in that 24-unit grid and the caller scales them to the
- * on-screen icon size.
- */
+/* JADX INFO: loaded from: classes.dex */
 public final class SvgPathParser {
 
-    /** Drawing commands produced by the parser. */
     public interface PathSink {
-        void moveTo(float x, float y);
-
-        void lineTo(float x, float y);
-
-        void cubicTo(float x1, float y1, float x2, float y2, float x, float y);
-
-        void quadTo(float x1, float y1, float x, float y);
-
         void close();
+
+        void cubicTo(float f, float f2, float f3, float f4, float f5, float f6);
+
+        void lineTo(float f, float f2);
+
+        void moveTo(float f, float f2);
+
+        void quadTo(float f, float f2, float f3, float f4);
     }
 
     private SvgPathParser() {
     }
 
-    /** Parse {@code pathData} and feed the commands to {@code sink}. */
-    public static void parse(String pathData, PathSink sink) {
-        if (pathData == null || sink == null) {
-            return;
-        }
-        Tokenizer t = new Tokenizer(pathData);
-        char cmd = 0;
-        float cx = 0.0f;
-        float cy = 0.0f;
-        float sx = 0.0f;
-        float sy = 0.0f;
-        float px = 0.0f;
-        float py = 0.0f;
-        float qx = 0.0f;
-        float qy = 0.0f;
-        char prevCmd = 0;
-        while (t.hasMore()) {
-            t.skipSeparators();
-            if (!t.hasMore()) {
-                break;
-            }
-            char c = t.peek();
-            if (isCommand(c)) {
-                cmd = t.next();
-                if (cmd == 'Z' || cmd == 'z') {
-                    sink.close();
-                    cx = sx;
-                    cy = sy;
-                    prevCmd = cmd;
-                    cmd = 0;
-                    continue;
-                }
-            } else if (cmd == 0) {
-                t.next();
-                continue;
-            }
-            boolean rel = Character.isLowerCase(cmd);
-            switch (Character.toUpperCase(cmd)) {
-                case 'M': {
-                    float x = t.nextFloat();
-                    float y = t.nextFloat();
-                    if (rel) {
-                        x += cx;
-                        y += cy;
-                    }
-                    sink.moveTo(x, y);
-                    cx = x;
-                    cy = y;
-                    sx = x;
-                    sy = y;
-                    cmd = rel ? 'l' : 'L';
-                    prevCmd = rel ? 'm' : 'M';
-                    break;
-                }
-                case 'L': {
-                    float x = t.nextFloat();
-                    float y = t.nextFloat();
-                    if (rel) {
-                        x += cx;
-                        y += cy;
-                    }
-                    sink.lineTo(x, y);
-                    cx = x;
-                    cy = y;
-                    prevCmd = cmd;
-                    break;
-                }
-                case 'H': {
-                    float x = t.nextFloat();
-                    if (rel) {
-                        x += cx;
-                    }
-                    sink.lineTo(x, cy);
-                    cx = x;
-                    prevCmd = cmd;
-                    break;
-                }
-                case 'V': {
-                    float y = t.nextFloat();
-                    if (rel) {
-                        y += cy;
-                    }
-                    sink.lineTo(cx, y);
-                    cy = y;
-                    prevCmd = cmd;
-                    break;
-                }
-                case 'C': {
-                    float x1 = t.nextFloat();
-                    float y1 = t.nextFloat();
-                    float x2 = t.nextFloat();
-                    float y2 = t.nextFloat();
-                    float x = t.nextFloat();
-                    float y = t.nextFloat();
-                    if (rel) {
-                        x1 += cx;
-                        y1 += cy;
-                        x2 += cx;
-                        y2 += cy;
-                        x += cx;
-                        y += cy;
-                    }
-                    sink.cubicTo(x1, y1, x2, y2, x, y);
-                    px = x2;
-                    py = y2;
-                    cx = x;
-                    cy = y;
-                    prevCmd = cmd;
-                    break;
-                }
-                case 'S': {
-                    float x2 = t.nextFloat();
-                    float y2 = t.nextFloat();
-                    float x = t.nextFloat();
-                    float y = t.nextFloat();
-                    float x1;
-                    float y1;
-                    if (prevCmd == 'C' || prevCmd == 'c' || prevCmd == 'S' || prevCmd == 's') {
-                        x1 = 2.0f * cx - px;
-                        y1 = 2.0f * cy - py;
+    /* JADX WARN: Code duplicated, block: B:101:0x021a  */
+    /* JADX WARN: Code duplicated, block: B:104:0x0225  */
+    /* JADX WARN: Code duplicated, block: B:115:0x007b A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:116:0x008f A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:117:0x00cd A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:118:0x0122 A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:119:0x014e A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:120:0x017d A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:121:0x0199 A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:122:0x01ad A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:123:0x01f1 A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:124:0x0074 A[SYNTHETIC] */
+    /* JADX WARN: Code duplicated, block: B:29:0x0081  */
+    /* JADX WARN: Code duplicated, block: B:42:0x00ac  */
+    /* JADX WARN: Code duplicated, block: B:44:0x00b5  */
+    /* JADX WARN: Code duplicated, block: B:57:0x00f2  */
+    /* JADX WARN: Code duplicated, block: B:59:0x00fb  */
+    /* JADX WARN: Code duplicated, block: B:64:0x0134  */
+    /* JADX WARN: Code duplicated, block: B:69:0x0158  */
+    /* JADX WARN: Code duplicated, block: B:70:0x015d  */
+    /* JADX WARN: Code duplicated, block: B:73:0x0168  */
+    /* JADX WARN: Code duplicated, block: B:74:0x016b  */
+    /* JADX WARN: Code duplicated, block: B:76:0x016f  */
+    /* JADX WARN: Code duplicated, block: B:77:0x0172  */
+    /* JADX WARN: Code duplicated, block: B:81:0x0187  */
+    /* JADX WARN: Code duplicated, block: B:86:0x019f  */
+    /* JADX WARN: Code duplicated, block: B:91:0x01c7  */
+    /* JADX WARN: Code duplicated, block: B:96:0x020e  */
+    /* JADX WARN: Code duplicated, block: B:97:0x0210  */
+    public static void parse(String str, PathSink pathSink) {
+        char c;
+        boolean zIsLowerCase;
+        boolean z;
+        float fNextFloat;
+        float fNextFloat2;
+        float fNextFloat3;
+        float fNextFloat4;
+        float fNextFloat5;
+        float fNextFloat6;
+        float fNextFloat7;
+        float fNextFloat8;
+        float fNextFloat9;
+        float fNextFloat10;
+        float fNextFloat11;
+        float fNextFloat12;
+        float fNextFloat13;
+        char c2;
+        char c3;
+        float fNextFloat14;
+        float fNextFloat15;
+        float fNextFloat16;
+        float fNextFloat17;
+        float fNextFloat18;
+        float fNextFloat19;
+        float fNextFloat20;
+        float fNextFloat21;
+        float f;
+        float f2;
+        float fNextFloat22;
+        float fNextFloat23;
+        float f3;
+        float f4;
+        float fNextFloat24;
+        if (str != null && pathSink != null) {
+            Tokenizer tokenizer = new Tokenizer(str);
+            char c4 = 0;
+            char c5 = 0;
+            float f5 = 0.0f;
+            float f6 = 0.0f;
+            float f7 = 0.0f;
+            float f8 = 0.0f;
+            float f9 = 0.0f;
+            float f10 = 0.0f;
+            float f11 = 0.0f;
+            float f12 = 0.0f;
+            while (tokenizer.hasMore()) {
+                tokenizer.skipSeparators();
+                if (tokenizer.hasMore()) {
+                    if (isCommand(tokenizer.peek())) {
+                        char next = tokenizer.next();
+                        if (next == 'Z' || next == 'z') {
+                            pathSink.close();
+                            c5 = next;
+                            c4 = 0;
+                            f5 = f7;
+                            f6 = f8;
+                        } else {
+                            c = next;
+                            zIsLowerCase = Character.isLowerCase(c);
+                            switch (Character.toUpperCase(c)) {
+                                case 'A':
+                                    float fAbs = Math.abs(tokenizer.nextFloat());
+                                    float fAbs2 = Math.abs(tokenizer.nextFloat());
+                                    float fNextFloat25 = tokenizer.nextFloat();
+                                    if (tokenizer.nextFloat() != 0.0f) {
+                                        z = true;
+                                    } else {
+                                        z = false;
+                                    }
+                                    boolean z2 = tokenizer.nextFloat() != 0.0f;
+                                    fNextFloat = tokenizer.nextFloat();
+                                    fNextFloat2 = tokenizer.nextFloat();
+                                    if (zIsLowerCase) {
+                                        fNextFloat += f5;
+                                        fNextFloat2 += f6;
+                                    }
+                                    float f13 = fNextFloat;
+                                    float f14 = fNextFloat2;
+                                    arcTo(pathSink, f5, f6, fAbs, fAbs2, fNextFloat25, z, z2, f13, f14);
+                                    c4 = c;
+                                    c5 = c4;
+                                    f5 = f13;
+                                    f6 = f14;
+                                    break;
+                                case 'C':
+                                    fNextFloat3 = tokenizer.nextFloat();
+                                    fNextFloat4 = tokenizer.nextFloat();
+                                    fNextFloat5 = tokenizer.nextFloat();
+                                    fNextFloat6 = tokenizer.nextFloat();
+                                    fNextFloat7 = tokenizer.nextFloat();
+                                    fNextFloat8 = tokenizer.nextFloat();
+                                    if (zIsLowerCase) {
+                                        fNextFloat3 += f5;
+                                        fNextFloat4 += f6;
+                                        fNextFloat5 += f5;
+                                        fNextFloat6 += f6;
+                                        fNextFloat7 += f5;
+                                        fNextFloat8 += f6;
+                                    }
+                                    float f15 = fNextFloat5;
+                                    float f16 = fNextFloat6;
+                                    pathSink.cubicTo(fNextFloat3, fNextFloat4, f15, f16, fNextFloat7, fNextFloat8);
+                                    f5 = fNextFloat7;
+                                    f6 = fNextFloat8;
+                                    f10 = f16;
+                                    c4 = c;
+                                    c5 = c4;
+                                    f9 = f15;
+                                    break;
+                                case 'H':
+                                    fNextFloat9 = tokenizer.nextFloat();
+                                    if (zIsLowerCase) {
+                                        fNextFloat9 += f5;
+                                    }
+                                    f5 = fNextFloat9;
+                                    pathSink.lineTo(f5, f6);
+                                    c4 = c;
+                                    c5 = c4;
+                                    break;
+                                case 'L':
+                                    fNextFloat10 = tokenizer.nextFloat();
+                                    fNextFloat11 = tokenizer.nextFloat();
+                                    if (zIsLowerCase) {
+                                        fNextFloat10 += f5;
+                                        fNextFloat11 += f6;
+                                    }
+                                    f5 = fNextFloat10;
+                                    f6 = fNextFloat11;
+                                    pathSink.lineTo(f5, f6);
+                                    c4 = c;
+                                    c5 = c4;
+                                    break;
+                                case 'M':
+                                    fNextFloat12 = tokenizer.nextFloat();
+                                    fNextFloat13 = tokenizer.nextFloat();
+                                    if (zIsLowerCase) {
+                                        f5 = fNextFloat12;
+                                        f6 = fNextFloat13;
+                                    } else {
+                                        f5 = fNextFloat12 + f5;
+                                        f6 = fNextFloat13 + f6;
+                                    }
+                                    pathSink.moveTo(f5, f6);
+                                    if (zIsLowerCase) {
+                                        c2 = 'l';
+                                    } else {
+                                        c2 = 'L';
+                                    }
+                                    if (zIsLowerCase) {
+                                        c3 = 'm';
+                                    } else {
+                                        c3 = 'M';
+                                    }
+                                    f7 = f5;
+                                    f8 = f6;
+                                    char c6 = c2;
+                                    c5 = c3;
+                                    c4 = c6;
+                                    break;
+                                case 'Q':
+                                    fNextFloat14 = tokenizer.nextFloat();
+                                    fNextFloat15 = tokenizer.nextFloat();
+                                    fNextFloat16 = tokenizer.nextFloat();
+                                    fNextFloat17 = tokenizer.nextFloat();
+                                    if (zIsLowerCase) {
+                                        fNextFloat14 += f5;
+                                        fNextFloat15 += f6;
+                                        fNextFloat16 += f5;
+                                        fNextFloat17 += f6;
+                                    }
+                                    f5 = fNextFloat16;
+                                    f6 = fNextFloat17;
+                                    pathSink.quadTo(fNextFloat14, fNextFloat15, f5, f6);
+                                    f11 = fNextFloat14;
+                                    f12 = fNextFloat15;
+                                    c4 = c;
+                                    c5 = c4;
+                                    break;
+                                case 'S':
+                                    fNextFloat18 = tokenizer.nextFloat();
+                                    fNextFloat19 = tokenizer.nextFloat();
+                                    fNextFloat20 = tokenizer.nextFloat();
+                                    fNextFloat21 = tokenizer.nextFloat();
+                                    if (c5 != 'C' || c5 == 'c' || c5 == 'S' || c5 == 's') {
+                                        f = (f5 * 2.0f) - f9;
+                                        f2 = (2.0f * f6) - f10;
+                                    } else {
+                                        f = f5;
+                                        f2 = f6;
+                                    }
+                                    if (zIsLowerCase) {
+                                        fNextFloat18 += f5;
+                                        fNextFloat19 += f6;
+                                        fNextFloat20 += f5;
+                                        fNextFloat21 += f6;
+                                    }
+                                    float f17 = fNextFloat18;
+                                    float f18 = fNextFloat19;
+                                    pathSink.cubicTo(f, f2, f17, f18, fNextFloat20, fNextFloat21);
+                                    f5 = fNextFloat20;
+                                    f6 = fNextFloat21;
+                                    f10 = f18;
+                                    c4 = c;
+                                    c5 = c4;
+                                    f9 = f17;
+                                    break;
+                                case Settings.SWIPE_MIN_DP /* 84 */:
+                                    fNextFloat22 = tokenizer.nextFloat();
+                                    fNextFloat23 = tokenizer.nextFloat();
+                                    if (c5 != 'Q' || c5 == 'q' || c5 == 'T' || c5 == 't') {
+                                        f3 = (f5 * 2.0f) - f11;
+                                        f4 = (2.0f * f6) - f12;
+                                    } else {
+                                        f3 = f5;
+                                        f4 = f6;
+                                    }
+                                    if (zIsLowerCase) {
+                                        fNextFloat22 += f5;
+                                        fNextFloat23 += f6;
+                                    }
+                                    f5 = fNextFloat22;
+                                    f6 = fNextFloat23;
+                                    pathSink.quadTo(f3, f4, f5, f6);
+                                    f11 = f3;
+                                    f12 = f4;
+                                    c4 = c;
+                                    c5 = c4;
+                                    break;
+                                case 'V':
+                                    fNextFloat24 = tokenizer.nextFloat();
+                                    if (zIsLowerCase) {
+                                        fNextFloat24 += f6;
+                                    }
+                                    f6 = fNextFloat24;
+                                    pathSink.lineTo(f5, f6);
+                                    c4 = c;
+                                    c5 = c4;
+                                    break;
+                                default:
+                                    tokenizer.next();
+                                    c4 = c;
+                                    break;
+                            }
+                        }
+                    } else if (c4 != 0) {
+                        c = c4;
+                        zIsLowerCase = Character.isLowerCase(c);
+                        switch (Character.toUpperCase(c)) {
+                            case 'A':
+                                float fAbs3 = Math.abs(tokenizer.nextFloat());
+                                float fAbs4 = Math.abs(tokenizer.nextFloat());
+                                float fNextFloat26 = tokenizer.nextFloat();
+                                if (tokenizer.nextFloat() != 0.0f) {
+                                    z = true;
+                                } else {
+                                    z = false;
+                                }
+                                boolean z2 = tokenizer.nextFloat() != 0.0f;
+                                fNextFloat = tokenizer.nextFloat();
+                                fNextFloat2 = tokenizer.nextFloat();
+                                if (zIsLowerCase) {
+                                    fNextFloat += f5;
+                                    fNextFloat2 += f6;
+                                }
+                                float f19 = fNextFloat;
+                                float f110 = fNextFloat2;
+                                arcTo(pathSink, f5, f6, fAbs3, fAbs4, fNextFloat26, z, z2, f19, f110);
+                                c4 = c;
+                                c5 = c4;
+                                f5 = f19;
+                                f6 = f110;
+                                break;
+                            case 'C':
+                                fNextFloat3 = tokenizer.nextFloat();
+                                fNextFloat4 = tokenizer.nextFloat();
+                                fNextFloat5 = tokenizer.nextFloat();
+                                fNextFloat6 = tokenizer.nextFloat();
+                                fNextFloat7 = tokenizer.nextFloat();
+                                fNextFloat8 = tokenizer.nextFloat();
+                                if (zIsLowerCase) {
+                                    fNextFloat3 += f5;
+                                    fNextFloat4 += f6;
+                                    fNextFloat5 += f5;
+                                    fNextFloat6 += f6;
+                                    fNextFloat7 += f5;
+                                    fNextFloat8 += f6;
+                                }
+                                float f111 = fNextFloat5;
+                                float f112 = fNextFloat6;
+                                pathSink.cubicTo(fNextFloat3, fNextFloat4, f111, f112, fNextFloat7, fNextFloat8);
+                                f5 = fNextFloat7;
+                                f6 = fNextFloat8;
+                                f10 = f112;
+                                c4 = c;
+                                c5 = c4;
+                                f9 = f111;
+                                break;
+                            case 'H':
+                                fNextFloat9 = tokenizer.nextFloat();
+                                if (zIsLowerCase) {
+                                    fNextFloat9 += f5;
+                                }
+                                f5 = fNextFloat9;
+                                pathSink.lineTo(f5, f6);
+                                c4 = c;
+                                c5 = c4;
+                                break;
+                            case 'L':
+                                fNextFloat10 = tokenizer.nextFloat();
+                                fNextFloat11 = tokenizer.nextFloat();
+                                if (zIsLowerCase) {
+                                    fNextFloat10 += f5;
+                                    fNextFloat11 += f6;
+                                }
+                                f5 = fNextFloat10;
+                                f6 = fNextFloat11;
+                                pathSink.lineTo(f5, f6);
+                                c4 = c;
+                                c5 = c4;
+                                break;
+                            case 'M':
+                                fNextFloat12 = tokenizer.nextFloat();
+                                fNextFloat13 = tokenizer.nextFloat();
+                                if (zIsLowerCase) {
+                                    f5 = fNextFloat12;
+                                    f6 = fNextFloat13;
+                                } else {
+                                    f5 = fNextFloat12 + f5;
+                                    f6 = fNextFloat13 + f6;
+                                }
+                                pathSink.moveTo(f5, f6);
+                                if (zIsLowerCase) {
+                                    c2 = 'l';
+                                } else {
+                                    c2 = 'L';
+                                }
+                                if (zIsLowerCase) {
+                                    c3 = 'm';
+                                } else {
+                                    c3 = 'M';
+                                }
+                                f7 = f5;
+                                f8 = f6;
+                                char c7 = c2;
+                                c5 = c3;
+                                c4 = c7;
+                                break;
+                            case 'Q':
+                                fNextFloat14 = tokenizer.nextFloat();
+                                fNextFloat15 = tokenizer.nextFloat();
+                                fNextFloat16 = tokenizer.nextFloat();
+                                fNextFloat17 = tokenizer.nextFloat();
+                                if (zIsLowerCase) {
+                                    fNextFloat14 += f5;
+                                    fNextFloat15 += f6;
+                                    fNextFloat16 += f5;
+                                    fNextFloat17 += f6;
+                                }
+                                f5 = fNextFloat16;
+                                f6 = fNextFloat17;
+                                pathSink.quadTo(fNextFloat14, fNextFloat15, f5, f6);
+                                f11 = fNextFloat14;
+                                f12 = fNextFloat15;
+                                c4 = c;
+                                c5 = c4;
+                                break;
+                            case 'S':
+                                fNextFloat18 = tokenizer.nextFloat();
+                                fNextFloat19 = tokenizer.nextFloat();
+                                fNextFloat20 = tokenizer.nextFloat();
+                                fNextFloat21 = tokenizer.nextFloat();
+                                if (c5 != 'C') {
+                                    f = (f5 * 2.0f) - f9;
+                                    f2 = (2.0f * f6) - f10;
+                                } else {
+                                    f = (f5 * 2.0f) - f9;
+                                    f2 = (2.0f * f6) - f10;
+                                }
+                                if (zIsLowerCase) {
+                                    fNextFloat18 += f5;
+                                    fNextFloat19 += f6;
+                                    fNextFloat20 += f5;
+                                    fNextFloat21 += f6;
+                                }
+                                float f113 = fNextFloat18;
+                                float f114 = fNextFloat19;
+                                pathSink.cubicTo(f, f2, f113, f114, fNextFloat20, fNextFloat21);
+                                f5 = fNextFloat20;
+                                f6 = fNextFloat21;
+                                f10 = f114;
+                                c4 = c;
+                                c5 = c4;
+                                f9 = f113;
+                                break;
+                            case Settings.SWIPE_MIN_DP /* 84 */:
+                                fNextFloat22 = tokenizer.nextFloat();
+                                fNextFloat23 = tokenizer.nextFloat();
+                                if (c5 != 'Q') {
+                                    f3 = (f5 * 2.0f) - f11;
+                                    f4 = (2.0f * f6) - f12;
+                                } else {
+                                    f3 = (f5 * 2.0f) - f11;
+                                    f4 = (2.0f * f6) - f12;
+                                }
+                                if (zIsLowerCase) {
+                                    fNextFloat22 += f5;
+                                    fNextFloat23 += f6;
+                                }
+                                f5 = fNextFloat22;
+                                f6 = fNextFloat23;
+                                pathSink.quadTo(f3, f4, f5, f6);
+                                f11 = f3;
+                                f12 = f4;
+                                c4 = c;
+                                c5 = c4;
+                                break;
+                            case 'V':
+                                fNextFloat24 = tokenizer.nextFloat();
+                                if (zIsLowerCase) {
+                                    fNextFloat24 += f6;
+                                }
+                                f6 = fNextFloat24;
+                                pathSink.lineTo(f5, f6);
+                                c4 = c;
+                                c5 = c4;
+                                break;
+                            default:
+                                tokenizer.next();
+                                c4 = c;
+                                break;
+                        }
                     } else {
-                        x1 = cx;
-                        y1 = cy;
+                        tokenizer.next();
                     }
-                    if (rel) {
-                        x2 += cx;
-                        y2 += cy;
-                        x += cx;
-                        y += cy;
-                    }
-                    sink.cubicTo(x1, y1, x2, y2, x, y);
-                    px = x2;
-                    py = y2;
-                    cx = x;
-                    cy = y;
-                    prevCmd = cmd;
-                    break;
-                }
-                case 'Q': {
-                    float x1 = t.nextFloat();
-                    float y1 = t.nextFloat();
-                    float x = t.nextFloat();
-                    float y = t.nextFloat();
-                    if (rel) {
-                        x1 += cx;
-                        y1 += cy;
-                        x += cx;
-                        y += cy;
-                    }
-                    sink.quadTo(x1, y1, x, y);
-                    qx = x1;
-                    qy = y1;
-                    cx = x;
-                    cy = y;
-                    prevCmd = cmd;
-                    break;
-                }
-                case 'T': {
-                    float x = t.nextFloat();
-                    float y = t.nextFloat();
-                    float x1;
-                    float y1;
-                    if (prevCmd == 'Q' || prevCmd == 'q' || prevCmd == 'T' || prevCmd == 't') {
-                        x1 = 2.0f * cx - qx;
-                        y1 = 2.0f * cy - qy;
-                    } else {
-                        x1 = cx;
-                        y1 = cy;
-                    }
-                    if (rel) {
-                        x += cx;
-                        y += cy;
-                    }
-                    sink.quadTo(x1, y1, x, y);
-                    qx = x1;
-                    qy = y1;
-                    cx = x;
-                    cy = y;
-                    prevCmd = cmd;
-                    break;
-                }
-                case 'A': {
-                    float rx = Math.abs(t.nextFloat());
-                    float ry = Math.abs(t.nextFloat());
-                    float angle = t.nextFloat();
-                    boolean largeArc = t.nextFloat() != 0.0f;
-                    boolean sweep = t.nextFloat() != 0.0f;
-                    float x = t.nextFloat();
-                    float y = t.nextFloat();
-                    if (rel) {
-                        x += cx;
-                        y += cy;
-                    }
-                    arcTo(sink, cx, cy, rx, ry, angle, largeArc, sweep, x, y);
-                    cx = x;
-                    cy = y;
-                    prevCmd = cmd;
-                    break;
-                }
-                default: {
-                    t.next();
-                    break;
+                } else {
+                    return;
                 }
             }
         }
@@ -239,161 +493,184 @@ public final class SvgPathParser {
         return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z');
     }
 
-    /**
-     * Convert an SVG elliptical arc to cubic Bezier segments (SVG spec F.6.5).
-     * The arc is split into segments of at most 90 degrees.
-     */
-    private static void arcTo(PathSink sink, float x0, float y0, float rx, float ry,
-            float angleDeg, boolean largeArc, boolean sweep, float x1, float y1) {
-        if (rx == 0.0f || ry == 0.0f || (x0 == x1 && y0 == y1)) {
-            if (x0 != x1 || y0 != y1) {
-                sink.lineTo(x1, y1);
+    private static void arcTo(PathSink pathSink, float f, float f2, float f3, float f4, float f5, boolean z, boolean z2, float f6, float f7) {
+        double d;
+        double d2;
+        float f8;
+        float f9;
+        if (f3 != 0.0f && f4 != 0.0f) {
+            if (f != f6 || f2 != f7) {
+                double radians = Math.toRadians(((double) f5) % 360.0d);
+                double dCos = Math.cos(radians);
+                double dSin = Math.sin(radians);
+                double d3 = ((double) (f - f6)) / 2.0d;
+                double d4 = ((double) (f2 - f7)) / 2.0d;
+                double d5 = (dCos * d3) + (dSin * d4);
+                double d6 = ((-dSin) * d3) + (d4 * dCos);
+                double d7 = f3 * f3;
+                double d8 = f4 * f4;
+                double d9 = d5 * d5;
+                double d10 = d6 * d6;
+                double d11 = (d9 / d7) + (d10 / d8);
+                if (d11 <= 1.0d) {
+                    d = d8;
+                    d2 = d7;
+                    f8 = f3;
+                    f9 = f4;
+                } else {
+                    float fSqrt = (float) Math.sqrt(d11);
+                    float f10 = f3 * fSqrt;
+                    float f11 = fSqrt * f4;
+                    d2 = f10 * f10;
+                    d = f11 * f11;
+                    f8 = f10;
+                    f9 = f11;
+                }
+                double d12 = d2 * d;
+                double d13 = d2 * d10;
+                double d14 = d * d9;
+                double dSqrt = Math.sqrt(Math.max(0.0d, ((d12 - d13) - d14) / (d13 + d14))) * (z == z2 ? -1.0d : 1.0d);
+                double d15 = f8;
+                float f12 = f8;
+                double d16 = f9;
+                double d17 = ((dSqrt * d15) * d6) / d16;
+                double d18 = (((-dSqrt) * d16) * d5) / d15;
+                float f13 = f12;
+                double d19 = ((dCos * d17) - (dSin * d18)) + (((double) (f + f6)) / 2.0d);
+                double d20 = (dSin * d17) + (dCos * d18) + (((double) (f2 + f7)) / 2.0d);
+                double d21 = (d5 - d17) / d15;
+                double d22 = (d6 - d18) / d16;
+                double d23 = ((-d6) - d18) / d16;
+                double dAngleBetween = angleBetween(1.0d, 0.0d, d21, d22);
+                double dAngleBetween2 = angleBetween(d21, d22, ((-d5) - d17) / d15, d23);
+                if (!z2 && dAngleBetween2 > 0.0d) {
+                    dAngleBetween2 -= 360.0d;
+                } else if (z2 && dAngleBetween2 < 0.0d) {
+                    dAngleBetween2 += 360.0d;
+                }
+                int iCeil = (int) Math.ceil(Math.abs(dAngleBetween2) / 90.0d);
+                if (iCeil < 1) {
+                    iCeil = 1;
+                }
+                double radians2 = Math.toRadians(dAngleBetween2) / ((double) iCeil);
+                double radians3 = Math.toRadians(dAngleBetween);
+                int i = 0;
+                while (i < iCeil) {
+                    double d24 = radians3 + radians2;
+                    double dCos2 = Math.cos(radians3);
+                    double dSin2 = Math.sin(radians3);
+                    double dCos3 = Math.cos(d24);
+                    double dSin3 = Math.sin(d24);
+                    double dTan = Math.tan((d24 - radians3) / 4.0d) * 1.3333333333333333d;
+                    double d25 = d15 * dCos2;
+                    double d26 = d16 * dSin2;
+                    double d27 = (d19 + (d25 * dCos)) - (d26 * dSin);
+                    double d28 = d20 + (d25 * dSin) + (d26 * dCos);
+                    double d29 = d15 * dCos3;
+                    double d30 = d16 * dSin3;
+                    double d31 = d15;
+                    double d32 = (d19 + (d29 * dCos)) - (d30 * dSin);
+                    double d33 = radians2;
+                    double d34 = d20 + (d29 * dSin) + (d30 * dCos);
+                    int i2 = iCeil;
+                    double d35 = d20;
+                    float f14 = f13;
+                    double d36 = -f14;
+                    double d37 = dSin2 * d36;
+                    double d38 = dCos2 * d16;
+                    double d39 = d36 * dSin3;
+                    double d40 = d16 * dCos3;
+                    pathSink.cubicTo((float) (d27 + (((d37 * dCos) - (d38 * dSin)) * dTan)), (float) (d28 + (((d37 * dSin) + (d38 * dCos)) * dTan)), (float) (d32 - (((d39 * dCos) - (d40 * dSin)) * dTan)), (float) (d34 - (dTan * ((d39 * dSin) + (d40 * dCos)))), (float) d32, (float) d34);
+                    i++;
+                    radians2 = d33;
+                    d15 = d31;
+                    d20 = d35;
+                    radians3 = d24;
+                    f13 = f14;
+                    iCeil = i2;
+                }
+                return;
             }
-            return;
         }
-        double phi = Math.toRadians(angleDeg % 360.0);
-        double cosPhi = Math.cos(phi);
-        double sinPhi = Math.sin(phi);
-        double dx2 = (x0 - x1) / 2.0;
-        double dy2 = (y0 - y1) / 2.0;
-        double x1p = cosPhi * dx2 + sinPhi * dy2;
-        double y1p = -sinPhi * dx2 + cosPhi * dy2;
-        double rxSq = rx * rx;
-        double rySq = ry * ry;
-        double x1pSq = x1p * x1p;
-        double y1pSq = y1p * y1p;
-        double lambda = x1pSq / rxSq + y1pSq / rySq;
-        if (lambda > 1.0) {
-            double s = Math.sqrt(lambda);
-            rx *= (float) s;
-            ry *= (float) s;
-            rxSq = rx * rx;
-            rySq = ry * ry;
-        }
-        double sign = (largeArc == sweep) ? -1.0 : 1.0;
-        double num = rxSq * rySq - rxSq * y1pSq - rySq * x1pSq;
-        double den = rxSq * y1pSq + rySq * x1pSq;
-        double coef = sign * Math.sqrt(Math.max(0.0, num / den));
-        double cxp = coef * rx * y1p / ry;
-        double cyp = -coef * ry * x1p / rx;
-        double cx = cosPhi * cxp - sinPhi * cyp + (x0 + x1) / 2.0;
-        double cy = sinPhi * cxp + cosPhi * cyp + (y0 + y1) / 2.0;
-        double ux = (x1p - cxp) / rx;
-        double uy = (y1p - cyp) / ry;
-        double vx = (-x1p - cxp) / rx;
-        double vy = (-y1p - cyp) / ry;
-        double theta1 = angleBetween(1.0, 0.0, ux, uy);
-        double dTheta = angleBetween(ux, uy, vx, vy);
-        if (!sweep && dTheta > 0.0) {
-            dTheta -= 360.0;
-        } else if (sweep && dTheta < 0.0) {
-            dTheta += 360.0;
-        }
-        int segments = (int) Math.ceil(Math.abs(dTheta) / 90.0);
-        if (segments < 1) {
-            segments = 1;
-        }
-        double delta = Math.toRadians(dTheta) / segments;
-        double t = Math.toRadians(theta1);
-        for (int i = 0; i < segments; i++) {
-            double t2 = t + delta;
-            double cosT = Math.cos(t);
-            double sinT = Math.sin(t);
-            double cosT2 = Math.cos(t2);
-            double sinT2 = Math.sin(t2);
-            double k = 4.0 / 3.0 * Math.tan((t2 - t) / 4.0);
-            double xStart = cx + rx * cosT * cosPhi - ry * sinT * sinPhi;
-            double yStart = cy + rx * cosT * sinPhi + ry * sinT * cosPhi;
-            double xEnd = cx + rx * cosT2 * cosPhi - ry * sinT2 * sinPhi;
-            double yEnd = cy + rx * cosT2 * sinPhi + ry * sinT2 * cosPhi;
-            double dx1 = -rx * sinT;
-            double dy1 = ry * cosT;
-            double dx2b = -rx * sinT2;
-            double dy2b = ry * cosT2;
-            double c1x = xStart + k * (dx1 * cosPhi - dy1 * sinPhi);
-            double c1y = yStart + k * (dx1 * sinPhi + dy1 * cosPhi);
-            double c2x = xEnd - k * (dx2b * cosPhi - dy2b * sinPhi);
-            double c2y = yEnd - k * (dx2b * sinPhi + dy2b * cosPhi);
-            sink.cubicTo((float) c1x, (float) c1y, (float) c2x, (float) c2y,
-                    (float) xEnd, (float) yEnd);
-            t = t2;
+        if (f != f6 || f2 != f7) {
+            pathSink.lineTo(f6, f7);
         }
     }
 
-    private static double angleBetween(double ux, double uy, double vx, double vy) {
-        double dot = ux * vx + uy * vy;
-        double len = Math.sqrt((ux * ux + uy * uy) * (vx * vx + vy * vy));
-        double ang = Math.acos(Math.max(-1.0, Math.min(1.0, dot / len)));
-        if (ux * vy - uy * vx < 0.0) {
-            ang = -ang;
+    private static double angleBetween(double d, double d2, double d3, double d4) {
+        double dAcos = Math.acos(Math.max(-1.0d, Math.min(1.0d, ((d * d3) + (d2 * d4)) / Math.sqrt(((d * d) + (d2 * d2)) * ((d3 * d3) + (d4 * d4))))));
+        if ((d * d4) - (d2 * d3) < 0.0d) {
+            dAcos = -dAcos;
         }
-        return Math.toDegrees(ang);
+        return Math.toDegrees(dAcos);
     }
 
-    /** Tokenizer for pathData numbers and commands. */
     private static final class Tokenizer {
+        private int pos = 0;
         private final String s;
-        private int pos;
 
-        Tokenizer(String s) {
-            this.s = s;
-            this.pos = 0;
+        Tokenizer(String str) {
+            this.s = str;
         }
 
         boolean hasMore() {
-            return pos < s.length();
+            return this.pos < this.s.length();
         }
 
         char peek() {
-            return s.charAt(pos);
+            return this.s.charAt(this.pos);
         }
 
         char next() {
-            return s.charAt(pos++);
+            String str = this.s;
+            int i = this.pos;
+            this.pos = i + 1;
+            return str.charAt(i);
         }
 
         void skipSeparators() {
-            while (pos < s.length()) {
-                char c = s.charAt(pos);
-                if (c == ' ' || c == '\t' || c == '\n' || c == '\r' || c == ',') {
-                    pos++;
+            while (this.pos < this.s.length()) {
+                char cCharAt = this.s.charAt(this.pos);
+                if (cCharAt == ' ' || cCharAt == '\t' || cCharAt == '\n' || cCharAt == '\r' || cCharAt == ',') {
+                    this.pos++;
                 } else {
-                    break;
+                    return;
                 }
             }
         }
 
         float nextFloat() {
             skipSeparators();
-            int start = pos;
-            if (pos < s.length() && (s.charAt(pos) == '+' || s.charAt(pos) == '-')) {
-                pos++;
+            int i = this.pos;
+            if (this.pos < this.s.length() && (this.s.charAt(this.pos) == '+' || this.s.charAt(this.pos) == '-')) {
+                this.pos++;
             }
-            boolean seenDot = false;
-            boolean seenDigit = false;
-            boolean seenExp = false;
-            while (pos < s.length()) {
-                char c = s.charAt(pos);
-                if (c >= '0' && c <= '9') {
-                    seenDigit = true;
-                    pos++;
-                } else if (c == '.' && !seenDot && !seenExp) {
-                    seenDot = true;
-                    pos++;
-                } else if ((c == 'e' || c == 'E') && seenDigit && !seenExp) {
-                    seenExp = true;
-                    pos++;
-                    if (pos < s.length() && (s.charAt(pos) == '+' || s.charAt(pos) == '-')) {
-                        pos++;
-                    }
+            boolean z = false;
+            boolean z2 = false;
+            boolean z3 = false;
+            while (this.pos < this.s.length()) {
+                char cCharAt = this.s.charAt(this.pos);
+                if (cCharAt >= '0' && cCharAt <= '9') {
+                    this.pos++;
+                    z3 = true;
+                } else if (cCharAt == '.' && !z && !z2) {
+                    this.pos++;
+                    z = true;
                 } else {
-                    break;
+                    if ((cCharAt != 'e' && cCharAt != 'E') || !z3 || z2) {
+                        break;
+                    }
+                    this.pos++;
+                    if (this.pos < this.s.length() && (this.s.charAt(this.pos) == '+' || this.s.charAt(this.pos) == '-')) {
+                        this.pos++;
+                    }
+                    z2 = true;
                 }
             }
-            if (start == pos) {
-                throw new IllegalArgumentException("Expected number at " + start + " in: " + s);
+            if (i == this.pos) {
+                throw new IllegalArgumentException("Expected number at " + i + " in: " + this.s);
             }
-            return Float.parseFloat(s.substring(start, pos));
+            return Float.parseFloat(this.s.substring(i, this.pos));
         }
     }
 }

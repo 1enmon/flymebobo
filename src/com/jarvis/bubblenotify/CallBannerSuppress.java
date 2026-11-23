@@ -8,33 +8,18 @@ import android.util.Log;
 import io.github.libxposed.api.XposedInterface;
 import java.lang.reflect.Method;
 
-// Suppresses the system incoming-call heads-up banner in SystemUI so
-// only the bubble card shows.
-//
-// The notification itself is NOT cancelled here — it stays in the
-// shade and in the listener, so the bubble still triggers. Only the
-// floating banner is dropped. This matters because cancelling the
-// notification from the listener races the heads-up: the banner can
-// already be on screen before the cancel lands. Dropping it at the
-// heads-up layer removes the race.
-//
-// Identification: the banner belongs to the in-call UI package with
-// no channel or a "phone_*" channel; a call-category notification or
-// a fullscreen-intent notification from a dialer/phone/telecom
-// package counts too. The gate is the same pair of switches as the
-// in-call UI hiding (call enabled + hide system call prompt).
+/* JADX INFO: loaded from: classes.dex */
 public final class CallBannerSuppress {
     private static final long GATE_TTL_MS = 30000;
-
-    private final XposedInterface bridge;
     private final Application app;
+    private final XposedInterface bridge;
     private boolean done;
-    private boolean gateValue;
     private long gateStamp;
+    private boolean gateValue;
 
-    public CallBannerSuppress(XposedInterface xposed, Application app) {
-        this.bridge = xposed;
-        this.app = app;
+    public CallBannerSuppress(XposedInterface xposedInterface, Application application) {
+        this.bridge = xposedInterface;
+        this.app = application;
     }
 
     public void install() {
@@ -42,117 +27,108 @@ public final class CallBannerSuppress {
             return;
         }
         try {
-            Class<?> headsUp = Class.forName("com.android.systemui.statusbar.notification.headsup.HeadsUpManagerImpl", false, this.app.getClassLoader());
-            int count = 0;
-            for (Method m : headsUp.getDeclaredMethods()) {
-                if (!"showNotification".equals(m.getName())) {
-                    continue;
-                }
-                if (attach(m)) {
-                    count++;
+            int i = 0;
+            for (Method method : Class.forName("com.android.systemui.statusbar.notification.headsup.HeadsUpManagerImpl", false, this.app.getClassLoader()).getDeclaredMethods()) {
+                if ("showNotification".equals(method.getName()) && attach(method)) {
+                    i++;
                 }
             }
-            if (count == 0) {
+            if (i == 0) {
                 log("CallBannerSuppress: showNotification not found");
-                return;
+            } else {
+                this.done = true;
+                log("CallBannerSuppress: HeadsUpManagerImpl.showNotification hooked (" + i + " overloads)");
             }
-            this.done = true;
-            log("CallBannerSuppress: HeadsUpManagerImpl.showNotification hooked (" + count + " overloads)");
         } catch (Throwable th) {
-            log("CallBannerSuppress install failed: " + th);
+            log("CallBannerSuppress install failed: " + String.valueOf(th));
         }
     }
 
-    // Every showNotification overload takes the entry as its first
-    // argument, so one handler covers all of them.
-    private boolean attach(final Method target) {
+    private boolean attach(Method method) {
         try {
-            this.bridge.hook(target).intercept(new XposedInterface.Hooker() {
-                @Override
+            this.bridge.hook(method).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.CallBannerSuppress.1
                 public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    if (shouldDrop(chain.getArg(0))) {
-                        log("incoming-call banner suppressed");
+                    if (CallBannerSuppress.this.shouldDrop(chain.getArg(0))) {
+                        CallBannerSuppress.this.log("incoming-call banner suppressed");
                         return null;
                     }
                     return chain.proceed();
                 }
             });
-            StringBuilder sig = new StringBuilder();
-            for (Class<?> pt : target.getParameterTypes()) {
-                if (sig.length() > 0) {
-                    sig.append(", ");
+            StringBuilder sb = new StringBuilder();
+            for (Class<?> cls : method.getParameterTypes()) {
+                if (sb.length() > 0) {
+                    sb.append(", ");
                 }
-                sig.append(pt.getSimpleName());
+                sb.append(cls.getSimpleName());
             }
-            log("CallBannerSuppress: hooked showNotification(" + sig.toString() + ")");
+            log("CallBannerSuppress: hooked showNotification(" + sb.toString() + ")");
             return true;
         } catch (Throwable th) {
-            log("CallBannerSuppress: hook failed for " + target + ": " + th);
+            log("CallBannerSuppress: hook failed for " + String.valueOf(method) + ": " + String.valueOf(th));
             return false;
         }
     }
 
-    private boolean shouldDrop(Object entry) {
-        if (entry == null) {
+    /* JADX INFO: Access modifiers changed from: private */
+    public boolean shouldDrop(Object obj) {
+        if (obj == null) {
             return false;
         }
         try {
-            Object sbnObj = entry.getClass().getMethod("getSbn").invoke(entry);
-            if (!(sbnObj instanceof StatusBarNotification)) {
-                return false;
-            }
-            StatusBarNotification sbn = (StatusBarNotification) sbnObj;
-            return isCallHeadsUp(sbn) && suppressionOn();
-        } catch (Throwable ignored) {
+            Object objInvoke = obj.getClass().getMethod("getSbn", new Class[0]).invoke(obj, new Object[0]);
+            return (objInvoke instanceof StatusBarNotification) && isCallHeadsUp((StatusBarNotification) objInvoke) && suppressionOn();
+        } catch (Throwable th) {
             return false;
         }
     }
 
-    private boolean isCallHeadsUp(StatusBarNotification sbn) {
-        String pkg = sbn.getPackageName();
-        if (pkg == null) {
+    private boolean isCallHeadsUp(StatusBarNotification statusBarNotification) {
+        String packageName = statusBarNotification.getPackageName();
+        if (packageName == null) {
             return false;
         }
-        Notification n = sbn.getNotification();
-        String channel = n == null ? null : n.getChannelId();
-        if ("com.android.incallui".equals(pkg)) {
-            return channel == null || channel.startsWith("phone_");
+        Notification notification = statusBarNotification.getNotification();
+        String channelId = notification == null ? null : notification.getChannelId();
+        if (Settings.INCALLUI_PACKAGE.equals(packageName)) {
+            return channelId == null || channelId.startsWith("phone_");
         }
-        if (n == null) {
+        if (notification == null) {
             return false;
         }
-        if ("call".equals(n.category)) {
+        if ("call".equals(notification.category)) {
             return true;
         }
-        if (n.fullScreenIntent == null) {
+        if (notification.fullScreenIntent == null) {
             return false;
         }
-        String lower = pkg.toLowerCase();
-        return lower.contains("dialer") || lower.contains("phone") || lower.contains("telecom") || lower.contains("incallui") || lower.contains("call");
+        String lowerCase = packageName.toLowerCase();
+        return lowerCase.contains("dialer") || lowerCase.contains("phone") || lowerCase.contains("telecom") || lowerCase.contains("incallui") || lowerCase.contains("call");
     }
 
-    // The switch pair is read from the module's remote preferences and
-    // cached briefly so the heads-up path stays fast.
     private boolean suppressionOn() {
-        long now = System.currentTimeMillis();
-        if (now - this.gateStamp < GATE_TTL_MS) {
+        long jCurrentTimeMillis = System.currentTimeMillis();
+        if (jCurrentTimeMillis - this.gateStamp < GATE_TTL_MS) {
             return this.gateValue;
         }
-        boolean on = false;
+        boolean z = false;
         try {
-            SharedPreferences prefs = this.bridge.getRemotePreferences(Settings.PREFS_NAME);
-            on = prefs.getBoolean(Settings.KEY_CALL_ENABLED, true) && prefs.getBoolean(Settings.KEY_HIDE_CALL_UI, true);
-        } catch (Throwable ignored) {
+            SharedPreferences remotePreferences = this.bridge.getRemotePreferences(Settings.PREFS_NAME);
+            if (remotePreferences.getBoolean(Settings.KEY_CALL_ENABLED, true) && remotePreferences.getBoolean(Settings.KEY_HIDE_CALL_UI, true)) {
+                z = true;
+            }
+        } catch (Throwable th) {
         }
-        this.gateValue = on;
-        this.gateStamp = now;
-        return on;
+        this.gateValue = z;
+        this.gateStamp = jCurrentTimeMillis;
+        return z;
     }
 
-    private void log(String msg) {
+    /* JADX INFO: Access modifiers changed from: private */
+    public void log(String str) {
         try {
-            Log.i(Settings.TAG, msg);
-        } catch (Throwable ignored) {
+            Log.i(Settings.TAG, str);
+        } catch (Throwable th) {
         }
     }
 }

@@ -16,53 +16,31 @@ import android.util.Log;
 import io.github.libxposed.api.XposedInterface;
 import java.lang.reflect.Method;
 
-// Hides the system incoming-call UI so only the bubble card shows.
-//
-// Runs in the com.android.incallui process. Three interception points
-// cover every way the system call UI can appear:
-//   1. InCallActivity.onCreate — the fullscreen call page. We let the
-//      activity create itself, then finish it right away when the
-//      bubble owns the call.
-//   2. NotificationBroadcastReceiver.performFullscreenIntent — the
-//      broadcast that launches the fullscreen page. We drop it.
-//   3. InCallPresenter.showInCall — the entry that brings up the
-//      in-call UI. We drop it when a real incoming call is present.
-//
-// The bubble yields only when all of these hold: the call switches
-// are on, the screen is interactive, the keyguard is NOT locked, and
-// an incoming call exists. On the lock screen the system page still
-// shows, so the user can answer from there.
-//
-// Escape hatch: tapping the bubble's call card writes a request
-// token (CallBubble.openCallUi). A token younger than 3s lets the
-// launch through, so the user can still open the system call page
-// on demand. Without this the bubble could never hand the call back.
+/* JADX INFO: loaded from: classes.dex */
 public final class InCallUiHide {
+    private static final long GATE_TTL_MS = 30000;
+    private static final int HOOK_ALL = 7;
+    private static final int HOOK_BROADCAST = 2;
+    private static final int HOOK_PAGE = 1;
+    private static final int HOOK_PRESENTER = 4;
+    private static final long REQUEST_TTL_MS = 3000;
     private static final int RETRIES = 24;
     private static final long RETRY_DELAY_MS = 5000;
-    private static final long REQUEST_TTL_MS = 3000;
-    private static final long GATE_TTL_MS = 30000;
-
-    private static final int HOOK_PAGE = 1;
-    private static final int HOOK_BROADCAST = 2;
-    private static final int HOOK_PRESENTER = 4;
-    private static final int HOOK_ALL = HOOK_PAGE | HOOK_BROADCAST | HOOK_PRESENTER;
-
-    private final XposedInterface bridge;
     private final Application app;
+    private final XposedInterface bridge;
+    private Method callListIncoming;
+    private Method callListInstance;
+    private int installed;
     private final ClassLoader loader;
     private final Handler main = new Handler(Looper.getMainLooper());
-    private int installed;
-    private Method callListInstance;
-    private Method callListIncoming;
     private boolean switchCache;
     private boolean switchReady;
     private long switchStamp;
 
-    public InCallUiHide(XposedInterface xposed, Application app) {
-        this.bridge = xposed;
-        this.app = app;
-        this.loader = app.getClassLoader();
+    public InCallUiHide(XposedInterface xposedInterface, Application application) {
+        this.bridge = xposedInterface;
+        this.app = application;
+        this.loader = application.getClassLoader();
     }
 
     public void install() {
@@ -70,7 +48,8 @@ public final class InCallUiHide {
         tryInstall(0);
     }
 
-    private void tryInstall(final int attempt) {
+    /* JADX INFO: Access modifiers changed from: private */
+    public void tryInstall(final int i) {
         if ((this.installed & HOOK_PAGE) == 0 && attachPageHook()) {
             this.installed |= HOOK_PAGE;
         }
@@ -82,59 +61,56 @@ public final class InCallUiHide {
         }
         if (this.installed == HOOK_ALL) {
             log("InCallUiHide: all 3 call hooks installed");
-            return;
+        } else {
+            if (i < RETRIES) {
+                this.main.postDelayed(new Runnable() { // from class: com.jarvis.bubblenotify.InCallUiHide.1
+                    @Override // java.lang.Runnable
+                    public void run() {
+                        InCallUiHide.this.tryInstall(i + InCallUiHide.HOOK_PAGE);
+                    }
+                }, RETRY_DELAY_MS);
+                return;
+            }
+            log("InCallUiHide: gave up, hooked: fullscreen-page=" + ((this.installed & HOOK_PAGE) != 0 ? HOOK_PAGE : false) + " fullscreen-broadcast=" + ((this.installed & HOOK_BROADCAST) != 0 ? HOOK_PAGE : false) + " showInCall=" + ((this.installed & HOOK_PRESENTER) != 0));
         }
-        if (attempt < RETRIES) {
-            this.main.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    tryInstall(attempt + 1);
-                }
-            }, RETRY_DELAY_MS);
-            return;
-        }
-        log("InCallUiHide: gave up, hooked: fullscreen-page=" + ((this.installed & HOOK_PAGE) != 0) + " fullscreen-broadcast=" + ((this.installed & HOOK_BROADCAST) != 0) + " showInCall=" + ((this.installed & HOOK_PRESENTER) != 0));
     }
 
     private boolean attachPageHook() {
         try {
-            Method target = lookup("com.android.incallui.InCallActivity", "onCreate", Bundle.class);
-            if (target == null) {
+            Method methodLookup = lookup("com.android.incallui.InCallActivity", "onCreate", Bundle.class);
+            if (methodLookup == null) {
                 return false;
             }
-            this.bridge.hook(target).intercept(new XposedInterface.Hooker() {
-                @Override
+            this.bridge.hook(methodLookup).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.InCallUiHide.2
                 public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    boolean own = shouldYield(null, true);
-                    Object result = chain.proceed();
-                    if (own) {
-                        Object self = chain.getThisObject();
-                        if (self instanceof Activity) {
-                            ((Activity) self).finish();
+                    boolean zShouldYield = InCallUiHide.this.shouldYield(null, true);
+                    Object objProceed = chain.proceed();
+                    if (zShouldYield) {
+                        Object thisObject = chain.getThisObject();
+                        if (thisObject instanceof Activity) {
+                            ((Activity) thisObject).finish();
                         }
                     }
-                    return result;
+                    return objProceed;
                 }
             });
             return true;
         } catch (Throwable th) {
-            log("hook InCallActivity.onCreate failed: " + th);
+            log("hook InCallActivity.onCreate failed: " + String.valueOf(th));
             return false;
         }
     }
 
     private boolean attachBroadcastHook() {
         try {
-            Method target = lookup("com.android.incallui.notification.NotificationBroadcastReceiver", "performFullscreenIntent", Context.class, Intent.class);
-            if (target == null) {
+            Method methodLookup = lookup("com.android.incallui.notification.NotificationBroadcastReceiver", "performFullscreenIntent", Context.class, Intent.class);
+            if (methodLookup == null) {
                 return false;
             }
-            this.bridge.hook(target).intercept(new XposedInterface.Hooker() {
-                @Override
+            this.bridge.hook(methodLookup).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.InCallUiHide.3
                 public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    Object first = chain.getArg(0);
-                    Context ctx = first instanceof Context ? (Context) first : null;
-                    if (shouldYield(ctx, true)) {
+                    Object arg = chain.getArg(0);
+                    if (InCallUiHide.this.shouldYield(arg instanceof Context ? (Context) arg : null, true)) {
                         return null;
                     }
                     return chain.proceed();
@@ -142,22 +118,21 @@ public final class InCallUiHide {
             });
             return true;
         } catch (Throwable th) {
-            log("hook performFullscreenIntent failed: " + th);
+            log("hook performFullscreenIntent failed: " + String.valueOf(th));
             return false;
         }
     }
 
     private boolean attachPresenterHook() {
         try {
-            Class<?> flag = Boolean.TYPE;
-            Method target = lookup("com.android.incallui.InCallPresenter", "showInCall", flag, flag, flag, flag, flag, flag, flag);
-            if (target == null) {
+            Class cls = Boolean.TYPE;
+            Method methodLookup = lookup("com.android.incallui.InCallPresenter", "showInCall", cls, cls, cls, cls, cls, cls, cls);
+            if (methodLookup == null) {
                 return false;
             }
-            this.bridge.hook(target).intercept(new XposedInterface.Hooker() {
-                @Override
+            this.bridge.hook(methodLookup).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.InCallUiHide.4
                 public Object intercept(XposedInterface.Chain chain) throws Throwable {
-                    if (shouldYield(null, hasIncomingCall())) {
+                    if (InCallUiHide.this.shouldYield(null, InCallUiHide.this.hasIncomingCall())) {
                         return null;
                     }
                     return chain.proceed();
@@ -165,115 +140,117 @@ public final class InCallUiHide {
             });
             return true;
         } catch (Throwable th) {
-            log("hook InCallPresenter.showInCall failed: " + th);
+            log("hook InCallPresenter.showInCall failed: " + String.valueOf(th));
             return false;
         }
     }
 
-    private Method lookup(String className, String name, Class<?>... params) {
+    private Method lookup(String str, String str2, Class<?>... clsArr) {
         try {
-            Class<?> cls = Class.forName(className, false, this.loader);
-            return cls.getDeclaredMethod(name, params);
+            return Class.forName(str, false, this.loader).getDeclaredMethod(str2, clsArr);
         } catch (Throwable th) {
             return null;
         }
     }
 
-    // The bubble owns the call when the switches are on, the screen is
-    // up, the device is unlocked, and a call is actually ringing.
-    private boolean shouldYield(Context context, boolean incoming) {
-        if (hasFreshRequest()) {
+    /* JADX INFO: Access modifiers changed from: private */
+    public boolean shouldYield(Context context, boolean z) {
+        if (hasFreshRequest() || !switchesOn() || !z) {
             return false;
         }
-        if (!switchesOn() || !incoming) {
-            return false;
+        if (context == null) {
+            context = this.app;
         }
-        Context ctx = context != null ? context : this.app;
-        return screenUsable(ctx) && !deviceLocked(ctx);
+        // fixed185: suppress on the lock screen too (user
+        // "来电拦截没全"). The bubble is a SystemUI overlay
+        // and shows on the lock screen, so the user can still
+        // answer there. The old !deviceLocked() let the system
+        // call UI leak through whenever the phone was locked.
+        return screenUsable(context);
     }
 
-    // A request token written by the bubble's own call card. Fresh
-    // means the user just tapped the card, so let the system page open.
     private boolean hasFreshRequest() {
         try {
-            String token = android.provider.Settings.Global.getString(this.app.getContentResolver(), Settings.CALL_UI_REQUEST_KEY);
-            if (token == null || token.isEmpty()) {
+            String string = android.provider.Settings.Global.getString(this.app.getContentResolver(), Settings.CALL_UI_REQUEST_KEY);
+            if (string == null || string.isEmpty()) {
                 return false;
             }
             try {
-                long age = SystemClock.elapsedRealtime() - Long.parseLong(token);
-                if (age >= 0 && age <= REQUEST_TTL_MS) {
+                long jElapsedRealtime = SystemClock.elapsedRealtime() - Long.parseLong(string);
+                if (jElapsedRealtime >= 0 && jElapsedRealtime <= 3000) {
                     log("call UI request token fresh, let through");
                     return true;
                 }
-            } catch (NumberFormatException ignored) {
+            } catch (NumberFormatException e) {
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable th) {
         }
         return false;
     }
 
     private boolean switchesOn() {
-        long now = System.currentTimeMillis();
-        if (!this.switchReady || now - this.switchStamp >= GATE_TTL_MS) {
+        long jCurrentTimeMillis = System.currentTimeMillis();
+        if (!this.switchReady || jCurrentTimeMillis - this.switchStamp >= GATE_TTL_MS) {
             refreshSwitches();
         }
         return this.switchCache;
     }
 
     private void refreshSwitches() {
-        boolean on = false;
+        boolean z = false;
         try {
-            SharedPreferences prefs = this.bridge.getRemotePreferences(Settings.PREFS_NAME);
-            on = prefs.getBoolean(Settings.KEY_CALL_ENABLED, true) && prefs.getBoolean(Settings.KEY_HIDE_CALL_UI, true);
+            SharedPreferences remotePreferences = this.bridge.getRemotePreferences(Settings.PREFS_NAME);
+            if (remotePreferences.getBoolean(Settings.KEY_CALL_ENABLED, true) && remotePreferences.getBoolean(Settings.KEY_HIDE_CALL_UI, true)) {
+                z = true;
+            }
         } catch (Throwable th) {
-            log("gate load failed: " + th);
+            log("gate load failed: " + String.valueOf(th));
         }
-        this.switchCache = on;
+        this.switchCache = z;
         this.switchReady = true;
         this.switchStamp = System.currentTimeMillis();
-        log("InCallUiHide gate loaded: " + on);
+        log("InCallUiHide gate loaded: " + z);
     }
 
-    private boolean screenUsable(Context ctx) {
+    private boolean screenUsable(Context context) {
         try {
-            PowerManager pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
-            return pm == null || pm.isInteractive();
-        } catch (Throwable ignored) {
+            PowerManager powerManager = (PowerManager) context.getSystemService("power");
+            return powerManager == null || powerManager.isInteractive();
+        } catch (Throwable th) {
             return true;
         }
     }
 
-    private boolean deviceLocked(Context ctx) {
+    private boolean deviceLocked(Context context) {
         try {
-            KeyguardManager km = (KeyguardManager) ctx.getSystemService(Context.KEYGUARD_SERVICE);
-            if (km == null) {
+            KeyguardManager keyguardManager = (KeyguardManager) context.getSystemService("keyguard");
+            if (keyguardManager == null) {
                 return true;
             }
-            return Build.VERSION.SDK_INT >= 33 ? km.isKeyguardLocked() : km.inKeyguardRestrictedInputMode();
-        } catch (Throwable ignored) {
+            return Build.VERSION.SDK_INT >= 33 ? keyguardManager.isKeyguardLocked() : keyguardManager.inKeyguardRestrictedInputMode();
+        } catch (Throwable th) {
             return true;
         }
     }
 
-    private boolean hasIncomingCall() {
+    /* JADX INFO: Access modifiers changed from: private */
+    public boolean hasIncomingCall() {
         try {
             if (this.callListInstance == null) {
                 Class<?> cls = Class.forName("com.android.incallui.call.CallList", false, this.loader);
-                this.callListInstance = cls.getDeclaredMethod("getInstance");
-                this.callListIncoming = cls.getDeclaredMethod("getIncomingCall");
+                this.callListInstance = cls.getDeclaredMethod("getInstance", new Class[0]);
+                this.callListIncoming = cls.getDeclaredMethod("getIncomingCall", new Class[0]);
             }
-            Object list = this.callListInstance.invoke(null);
-            return this.callListIncoming.invoke(list) != null;
+            return this.callListIncoming.invoke(this.callListInstance.invoke(null, new Object[0]), new Object[0]) != null;
         } catch (Throwable th) {
             return false;
         }
     }
 
-    private void log(String msg) {
+    private void log(String str) {
         try {
-            Log.i(Settings.TAG, msg);
-        } catch (Throwable ignored) {
+            Log.i(Settings.TAG, str);
+        } catch (Throwable th) {
         }
     }
 }

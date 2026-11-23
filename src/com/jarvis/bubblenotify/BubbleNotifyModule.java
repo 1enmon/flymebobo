@@ -16,15 +16,11 @@ public class BubbleNotifyModule extends XposedModule {
             initSystemUi(packageReadyParam);
             return;
         }
-        // fixed32: also load in the InCallUI process to hide the system
-        // incoming-call fullscreen page (ported from Flyme Island
-        // InCallUiHooks). The user must scope this module to the Phone
-        // app (com.android.incallui) in LSPosed, or this never runs.
         if (Settings.INCALLUI_PACKAGE.equals(packageName)) {
             log(4, Settings.TAG, "Loaded in " + packageName + " (" + packageReadyParam.getApplicationInfo().processName + ")");
             FileLog.i("Loaded in " + packageName + " (" + packageReadyParam.getApplicationInfo().processName + ")");
             try {
-                hook(Class.forName("android.app.Application").getMethod("onCreate", new Class[0])).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.BubbleNotifyModule.2
+                hook(Class.forName("android.app.Application").getMethod("onCreate", new Class[0])).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.BubbleNotifyModule.1
                     public Object intercept(XposedInterface.Chain chain) throws Throwable {
                         Object objProceed = chain.proceed();
                         try {
@@ -46,10 +42,12 @@ public class BubbleNotifyModule extends XposedModule {
                 Object objInvoke = Class.forName("android.app.ActivityThread").getMethod("currentApplication", new Class[0]).invoke(null, new Object[0]);
                 if (objInvoke instanceof Application) {
                     tryInitInCallUi((Application) objInvoke);
+                    return;
                 }
+                return;
             } catch (Throwable th2) {
+                return;
             }
-            return;
         }
         detach();
     }
@@ -57,9 +55,9 @@ public class BubbleNotifyModule extends XposedModule {
     private void initSystemUi(XposedModuleInterface.PackageReadyParam packageReadyParam) {
         String packageName = packageReadyParam.getPackageName();
         log(4, Settings.TAG, "Loaded in " + packageName + " (" + packageReadyParam.getApplicationInfo().processName + ")");
-            FileLog.i("Loaded in " + packageName + " (" + packageReadyParam.getApplicationInfo().processName + ")");
+        FileLog.i("Loaded in " + packageName + " (" + packageReadyParam.getApplicationInfo().processName + ")");
         try {
-            hook(Class.forName("android.app.Application").getMethod("onCreate", new Class[0])).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.BubbleNotifyModule.1
+            hook(Class.forName("android.app.Application").getMethod("onCreate", new Class[0])).intercept(new XposedInterface.Hooker() { // from class: com.jarvis.bubblenotify.BubbleNotifyModule.2
                 public Object intercept(XposedInterface.Chain chain) throws Throwable {
                     Object objProceed = chain.proceed();
                     try {
@@ -86,46 +84,35 @@ public class BubbleNotifyModule extends XposedModule {
         }
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
     public synchronized void tryInit(Application application) {
         if (this.initialized) {
             return;
         }
         if (Settings.SYSTEMUI_PACKAGE.equals(application.getPackageName())) {
-            // fixed32: a second SystemUI sub-process (e.g. :remote) would
-            // create a second BubbleManager + window, so the same
-            // notification pops twice and a card and a docked icon can
-            // show at once (screenshot 2084: two independent windows
-            // overlap, which a single dock's children cannot do). Only
-            // the main SystemUI process inits.
-            String proc = application.getApplicationInfo().processName;
-            if (!Settings.SYSTEMUI_PACKAGE.equals(proc)) {
-                log(4, Settings.TAG, "Skip non-main SystemUI process: " + proc);
-                FileLog.i("Skip non-main SystemUI process: " + proc);
-                return;
+            String str = application.getApplicationInfo().processName;
+            if (!Settings.SYSTEMUI_PACKAGE.equals(str)) {
+                log(4, Settings.TAG, "Skip non-main SystemUI process: " + str);
+                FileLog.i("Skip non-main SystemUI process: " + str);
+            } else {
+                this.initialized = true;
+                log(4, Settings.TAG, "Application: " + application.getClass().getName());
+                BubbleManager.getInstance().init(this, application);
             }
-            this.initialized = true;
-            log(4, Settings.TAG, "Application: " + application.getClass().getName());
-            BubbleManager.getInstance().init(this, application);
         }
     }
-
-    /* JADX INFO: Access modifiers changed from: private */
-    /* JADX INFO: Access modifiers changed from: private */
 
     public synchronized void tryInitInCallUi(Application application) {
         if (this.inCallUiInitialized) {
             return;
         }
-        if (!Settings.INCALLUI_PACKAGE.equals(application.getPackageName())) {
-            return;
-        }
-        this.inCallUiInitialized = true;
-        log(4, Settings.TAG, "InCallUI: " + application.getClass().getName());
-        try {
-            new InCallUiHide(this, application).install();
-        } catch (Throwable th) {
-            log(6, Settings.TAG, "InCallUiHide install failed", th);
+        if (Settings.INCALLUI_PACKAGE.equals(application.getPackageName())) {
+            this.inCallUiInitialized = true;
+            log(4, Settings.TAG, "InCallUI: " + application.getClass().getName());
+            try {
+                new InCallUiHide(this, application).install();
+            } catch (Throwable th) {
+                log(6, Settings.TAG, "InCallUiHide install failed", th);
+            }
         }
     }
 }

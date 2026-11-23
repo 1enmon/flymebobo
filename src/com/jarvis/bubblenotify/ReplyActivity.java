@@ -53,9 +53,7 @@ public class ReplyActivity extends Activity {
         GradientDrawable gradientDrawable = new GradientDrawable();
         gradientDrawable.setColor(-419430401);
         gradientDrawable.setCornerRadius(dp(18));
-        // fixed64: same visible border as the cards. The panel is
-        // always light, so the border is fixed dark (no host here).
-        gradientDrawable.setStroke(dp(1), 0x59000000);
+        gradientDrawable.setStroke(dp(1), 1493172224);
         linearLayout.setBackground(gradientDrawable);
         int iDp = dp(16);
         linearLayout.setPadding(iDp, iDp, iDp, iDp);
@@ -143,7 +141,6 @@ public class ReplyActivity extends Activity {
         this.editText.requestFocus();
     }
 
-    /* JADX INFO: Access modifiers changed from: private */
     public void sendReply() {
         String string = (this.editText == null || this.editText.getText() == null) ? "" : this.editText.getText().toString();
         if (string.trim().isEmpty()) {

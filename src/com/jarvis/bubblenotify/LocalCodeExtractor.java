@@ -2,298 +2,290 @@ package com.jarvis.bubblenotify;
 
 import android.content.SharedPreferences;
 import java.util.ArrayList;
-import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.json.JSONObject;
 
-/* fixed71: local (on-device, no network) extraction of verification /
-* pickup codes from a notification's title + text. Replaces AiClient,
-* which sent the notification to a remote OpenAI-compatible endpoint —
-* the user asked to drop the AI call and recognise locally instead
-* (2026-11-17 21:08 "去掉ai识别短信验证码取件码取货码改成本地识别").
-* Same Callback shape as AiClient had, so the rest of the pipeline
-* (NotificationService -> ACTION_CODE broadcast -> NotifBubble codes map
-* -> buildAiCapsule) is unchanged. Runs synchronously on the caller's
-* thread: the input is a short notification text, regex only.
-*
-* fixed89: the recognition rules are customisable. The keyword lists
-* (pickup / verify / verify-before / verify-en) and the bare-digit
-* exclude words live in SharedPreferences as a JSON string under
-* Settings.KEY_CODE_RULES; the MainActivity rules editor writes it.
-* extractCode reads the JSON on every call and recompiles only when
-* it changed, so a rule edit takes effect on the next notification
-* with no restart and no broadcast. Absent / malformed JSON falls
-* back to the built-in defaults below. Keywords are Pattern.quoted,
-* so a user-typed keyword is always literal text, never a regex that
-* could break the whole matcher.
-*/
+/* JADX INFO: loaded from: classes.dex */
 public class LocalCodeExtractor {
-    public interface Callback {
-        void onCodeFound(String kind, String code);
-
-        void onNoCode();
-    }
-
-    // Built-in defaults (the fixed71 rules).
-    public static final String DEF_PICKUP = "取件码|取货码|提货码|自提码|取件密码|提货密码";
+    public static final String DEF_EXCLUDE = "订单|单号|卡号|尾号|账号|工号|编号|流水|运单|包裹|快递|房号|房间|金额|价格";
+    public static final String DEF_PICKUP = "取件码|取货码|提货码|自提码|取餐码|取件密码|提货密码|寄存码|领取码";
     public static final String DEF_VERIFY = "短信验证码|手机验证码|验证码|动态码|校验码|验证代码";
     public static final String DEF_VERIFY_BEFORE = "验证码|动态码|校验码";
     public static final String DEF_VERIFY_EN = "verification code|verify code|OTP|auth code";
-    public static final String DEF_EXCLUDE = "订单|单号|卡号|尾号|账号|工号|编号|流水|运单|包裹|快递|房号|房间|金额|价格";
-
-    // Separators that may sit between a keyword and its code:
-    // "验证码是123456" / "验证码：123456" / "验证码 123456" /
-    // "验证码（123456）" / "取件码".
     private static final String SEP = "[\\s:：是为（(【\\[]";
-    private static final Pattern BARE_DIGITS = Pattern.compile("(?<!\\d)(\\d{4,6})(?!\\d)");
-
-    // Compiled rules cache — recompiled only when the rules JSON changes.
-    private static String cachedJson = null;
+    private static String[] excludeWords;
     private static Pattern pickupPattern;
+    // fixed184: 2.0 v245 locker/courier code with no keyword
+    // ("请凭173351取件", "凭10-18-0413取件"), and
+    // hyphenated pickup codes ("10-18-0413").
+    private static final Pattern LOCKER_CODE_PATTERN = Pattern.compile("\u51ed\\s*([0-9]{4,8}|[0-9]{2,4}(?:-[0-9]{2,4}){1,2})");
+    private static final Pattern HYPHEN_CODE_PATTERN = Pattern.compile("[0-9]{2,4}(?:-[0-9]{2,4}){1,2}");
     private static Pattern verifyAfterPattern;
     private static Pattern verifyBeforePattern;
     private static Pattern verifyEnPattern;
-    private static String[] excludeWords;
+    private static final Pattern BARE_DIGITS = Pattern.compile("(?<!\\d)(\\d{4,6})(?!\\d)");
+    private static String cachedJson = null;
     private static boolean bareOn = true;
+
+    public interface Callback {
+        void onCodeFound(String str, String str2);
+
+        void onNoCode();
+    }
 
     static {
         rebuildRules(null);
     }
 
-    // Read one keyword list from the rules JSON (or the default).
-    public static String readRule(SharedPreferences prefs, String key, String def) {
+    public static String readRule(SharedPreferences sharedPreferences, String str, String str2) {
+        String strOptString;
+        if (sharedPreferences == null) {
+            return str2;
+        }
         try {
-            if (prefs == null) {
-                return def;
+            String string = sharedPreferences.getString(Settings.KEY_CODE_RULES, null);
+            if (string != null && !string.isEmpty()) {
+                JSONObject jSONObject = new JSONObject(string);
+                return (jSONObject.has(str) && (strOptString = jSONObject.optString(str, str2)) != null) ? strOptString : str2;
             }
-            String json = prefs.getString(Settings.KEY_CODE_RULES, null);
-            if (json == null || json.isEmpty()) {
-                return def;
-            }
-            JSONObject obj = new JSONObject(json);
-            if (!obj.has(key)) {
-                return def;
-            }
-            String v = obj.optString(key, def);
-            return v == null ? def : v;
-        } catch (Throwable ignored) {
-            return def;
+            return str2;
+        } catch (Throwable th) {
+            return str2;
         }
     }
 
-    public static boolean readBareOn(SharedPreferences prefs) {
+    public static boolean readBareOn(SharedPreferences sharedPreferences) {
+        if (sharedPreferences == null) {
+            return true;
+        }
         try {
-            if (prefs == null) {
-                return true;
+            String string = sharedPreferences.getString(Settings.KEY_CODE_RULES, null);
+            if (string != null && !string.isEmpty()) {
+                return new JSONObject(string).optBoolean("bareOn", true);
             }
-            String json = prefs.getString(Settings.KEY_CODE_RULES, null);
-            if (json == null || json.isEmpty()) {
-                return true;
-            }
-            JSONObject obj = new JSONObject(json);
-            return obj.optBoolean("bareOn", true);
-        } catch (Throwable ignored) {
+            return true;
+        } catch (Throwable th) {
             return true;
         }
     }
 
-    // (Re)build the compiled patterns from the rules JSON. Called on
-    // every extract; cheap string compare, recompile only on change.
-    private static synchronized void rebuildRules(SharedPreferences prefs) {
-        String json = null;
-        try {
-            if (prefs != null) {
-                json = prefs.getString(Settings.KEY_CODE_RULES, null);
+    private static synchronized void rebuildRules(SharedPreferences sharedPreferences) {
+        String string;
+        if (sharedPreferences != null) {
+            try {
+                string = sharedPreferences.getString(Settings.KEY_CODE_RULES, null);
+            } catch (Throwable th) {
+                string = null;
             }
-        } catch (Throwable ignored) {
+        } else {
+            string = null;
         }
-        if (json != null && json.equals(cachedJson)) {
-            return;
+        if (string != null) {
+            if (string.equals(cachedJson)) {
+                return;
+            }
         }
-        cachedJson = json;
-        String pickup = readRule(prefs, "pickup", DEF_PICKUP);
-        String verify = readRule(prefs, "verify", DEF_VERIFY);
-        String verifyBefore = readRule(prefs, "verifyBefore", DEF_VERIFY_BEFORE);
-        String verifyEn = readRule(prefs, "verifyEn", DEF_VERIFY_EN);
-        String exclude = readRule(prefs, "exclude", DEF_EXCLUDE);
-        bareOn = readBareOn(prefs);
-        pickupPattern = compileKeywordPattern(pickup, SEP + "{0,4}([A-Za-z0-9]{4,8})(?![A-Za-z0-9])", false);
-        verifyAfterPattern = compileKeywordPattern(verify, SEP + "{0,4}(\\d{4,8})(?!\\d)", false);
-        verifyBeforePattern = compileKeywordPattern(verifyBefore, null, true);
-        verifyEnPattern = compileKeywordPattern(verifyEn, "[^0-9]{0,12}(\\d{4,8})(?!\\d)", true);
-        excludeWords = splitKeywords(exclude);
+        cachedJson = string;
+        String rule = readRule(sharedPreferences, "pickup", DEF_PICKUP);
+        String rule2 = readRule(sharedPreferences, "verify", DEF_VERIFY);
+        String rule3 = readRule(sharedPreferences, "verifyBefore", DEF_VERIFY_BEFORE);
+        String rule4 = readRule(sharedPreferences, "verifyEn", DEF_VERIFY_EN);
+        String rule5 = readRule(sharedPreferences, "exclude", DEF_EXCLUDE);
+        bareOn = readBareOn(sharedPreferences);
+        pickupPattern = compileKeywordPattern(rule, "[\\s:：是为（(【\\[]{0,4}([A-Za-z0-9]{4,8})(?![A-Za-z0-9])", false);
+        verifyAfterPattern = compileKeywordPattern(rule2, "[\\s:：是为（(【\\[]{0,4}(\\d{4,8})(?!\\d)", false);
+        verifyBeforePattern = compileKeywordPattern(rule3, null, true);
+        verifyEnPattern = compileKeywordPattern(rule4, "[^0-9]{0,12}(\\d{4,8})(?!\\d)", true);
+        excludeWords = splitKeywords(rule5);
     }
 
-    // Build "(?:kw1|kw2|...)" + tail. Keywords are Pattern.quoted
-    // (literal). verifyBefore is special: the code comes BEFORE the
-    // keyword, so the pattern is "(\d{4,8})(?:是|为|您的|你的|的)
-    // [^0-9]{0,4}(?:keywords)". Returns null when the list is empty
-    // (rule disabled).
-    private static Pattern compileKeywordPattern(String keywords, String tail, boolean ignoreCase) {
+    private static Pattern compileKeywordPattern(String str, String str2, boolean z) {
         try {
-            String[] kws = splitKeywords(keywords);
-            if (kws.length == 0) {
+            String[] strArrSplitKeywords = splitKeywords(str);
+            if (strArrSplitKeywords.length == 0) {
                 return null;
             }
-            StringBuilder alt = new StringBuilder();
-            for (String kw : kws) {
-                if (alt.length() > 0) {
-                    alt.append('|');
+            StringBuilder sb = new StringBuilder();
+            for (String str3 : strArrSplitKeywords) {
+                if (sb.length() > 0) {
+                    sb.append('|');
                 }
-                alt.append(Pattern.quote(kw));
+                sb.append(Pattern.quote(str3));
             }
-            String regex;
-            if (tail == null) {
-                regex = "(\\d{4,8})(?:是|为|您的|你的|的)[^0-9]{0,4}(?:" + alt + ")";
-            } else {
-                regex = "(?:" + alt + ")" + tail;
-            }
-            int flags = ignoreCase ? Pattern.CASE_INSENSITIVE : 0;
-            return Pattern.compile(regex, flags);
-        } catch (Throwable ignored) {
+            return Pattern.compile(str2 == null ? "(\\d{4,8})(?:是|为|您的|你的|的)[^0-9]{0,4}(?:" + String.valueOf(sb) + ")" : "(?:" + String.valueOf(sb) + ")" + str2, z ? 2 : 0);
+        } catch (Throwable th) {
             return null;
         }
     }
 
-    private static String[] splitKeywords(String keywords) {
-        if (keywords == null) {
+    private static String[] splitKeywords(String str) {
+        if (str == null) {
             return new String[0];
         }
-        String[] parts = keywords.split("\\|");
-        List<String> out = new ArrayList<String>();
-        for (String p : parts) {
-            String t = p == null ? "" : p.trim();
-            if (!t.isEmpty()) {
-                out.add(t);
+        String[] strArrSplit = str.split("\\|");
+        ArrayList arrayList = new ArrayList();
+        int length = strArrSplit.length;
+        for (int i = 0; i < length; i++) {
+            String str2 = strArrSplit[i];
+            String strTrim = str2 == null ? "" : str2.trim();
+            if (!strTrim.isEmpty()) {
+                arrayList.add(strTrim);
             }
         }
-        return out.toArray(new String[0]);
+        return (String[]) arrayList.toArray(new String[0]);
     }
 
-    public static void extractCode(String title, String text, Callback callback) {
-        extractCode(title, text, null, callback);
+    public static void extractCode(String str, String str2, Callback callback) {
+        extractCode(str, str2, null, callback);
     }
 
-    public static void extractCode(String title, String text, SharedPreferences prefs, Callback callback) {
+    public static void extractCode(String str, String str2, SharedPreferences sharedPreferences, Callback callback) {
+        String strFindBareCode;
         if (callback == null) {
             return;
         }
         try {
-            rebuildRules(prefs);
-            String combined = combine(title, text);
-            if (combined.isEmpty()) {
+            rebuildRules(sharedPreferences);
+            String strCombine = combine(str, str2);
+            if (strCombine.isEmpty()) {
                 callback.onNoCode();
                 return;
             }
-            String code;
-            // Pickup codes first: their keywords are the most specific.
-            code = find(pickupPattern, combined);
-            if (code != null) {
-                callback.onCodeFound(Settings.CODE_KIND_PICKUP, code);
+            String strFind = find(pickupPattern, strCombine);
+            if (strFind != null) {
+                callback.onCodeFound(Settings.CODE_KIND_PICKUP, strFind);
                 return;
             }
-            code = find(verifyAfterPattern, combined);
-            if (code != null) {
-                callback.onCodeFound(Settings.CODE_KIND_VERIFY, code);
+            String lockerCode = find(LOCKER_CODE_PATTERN, strCombine);
+            if (lockerCode != null) {
+                callback.onCodeFound(Settings.CODE_KIND_PICKUP, lockerCode);
                 return;
             }
-            code = find(verifyBeforePattern, combined);
-            if (code != null) {
-                callback.onCodeFound(Settings.CODE_KIND_VERIFY, code);
+            String hyphenCode = findHyphenPickupCode(strCombine);
+            if (hyphenCode != null) {
+                callback.onCodeFound(Settings.CODE_KIND_PICKUP, hyphenCode);
                 return;
             }
-            code = find(verifyEnPattern, combined);
-            if (code != null) {
-                callback.onCodeFound(Settings.CODE_KIND_VERIFY, code);
+            String strFind2 = find(verifyAfterPattern, strCombine);
+            if (strFind2 != null) {
+                callback.onCodeFound(Settings.CODE_KIND_VERIFY, strFind2);
                 return;
             }
-            // Bare fallback: exactly one standalone 4-6 digit group that
-            // is not a date / amount / order number. Ambiguous -> no code.
-            if (bareOn) {
-                code = findBareCode(combined);
-                if (code != null) {
-                    callback.onCodeFound(Settings.CODE_KIND_VERIFY, code);
-                    return;
-                }
+            String strFind3 = find(verifyBeforePattern, strCombine);
+            if (strFind3 != null) {
+                callback.onCodeFound(Settings.CODE_KIND_VERIFY, strFind3);
+                return;
             }
-            callback.onNoCode();
+            String strFind4 = find(verifyEnPattern, strCombine);
+            if (strFind4 != null) {
+                callback.onCodeFound(Settings.CODE_KIND_VERIFY, strFind4);
+            } else if (bareOn && (strFindBareCode = findBareCode(strCombine)) != null) {
+                callback.onCodeFound(Settings.CODE_KIND_VERIFY, strFindBareCode);
+            } else {
+                callback.onNoCode();
+            }
         } catch (Throwable th) {
             callback.onNoCode();
         }
     }
 
-    private static String combine(String title, String text) {
+    private static String combine(String str, String str2) {
         StringBuilder sb = new StringBuilder();
-        if (title != null && !title.trim().isEmpty()) {
-            sb.append(title.trim());
+        if (str != null && !str.trim().isEmpty()) {
+            sb.append(str.trim());
         }
-        if (text != null && !text.trim().isEmpty()) {
+        if (str2 != null && !str2.trim().isEmpty()) {
             if (sb.length() > 0) {
                 sb.append('\n');
             }
-            sb.append(text.trim());
+            sb.append(str2.trim());
         }
         return sb.toString();
     }
 
-    private static String find(Pattern pattern, String input) {
+    private static String find(Pattern pattern, String str) {
+        String strGroup;
         if (pattern == null) {
             return null;
         }
-        Matcher m = pattern.matcher(input);
-        if (m.find()) {
-            String g = m.group(1);
-            if (g != null && !g.isEmpty()) {
-                return g;
+        Matcher matcher = pattern.matcher(str);
+        if (!matcher.find() || (strGroup = matcher.group(1)) == null || strGroup.isEmpty()) {
+            return null;
+        }
+        return strGroup;
+    }
+
+    private static String findHyphenPickupCode(String str) {
+        try {
+            java.util.regex.Matcher m = HYPHEN_CODE_PATTERN.matcher(str);
+            String[] keywords = {"取件码", "取货码", "提货码", "自提码", "取餐码", "寄存码", "领取码", "取件密码", "提货密码"};
+            while (m.find()) {
+                String code = m.group();
+                int start = m.start();
+                String before = str.substring(Math.max(0, start - 20), start);
+                for (String kw : keywords) {
+                    if (before.contains(kw)) {
+                        return code;
+                    }
+                }
             }
+        } catch (Throwable ignored) {
         }
         return null;
     }
 
-    private static String findBareCode(String input) {
-        Matcher m = BARE_DIGITS.matcher(input);
-        String found = null;
-        int count = 0;
-        while (m.find()) {
-            String g = m.group(1);
-            int start = m.start(1);
-            int end = m.end(1);
-            // Amount: ￥1234 / ¥1234.
-            if (start > 0 && (input.charAt(start - 1) == '￥' || input.charAt(start - 1) == '¥')) {
-                continue;
-            }
-            // Date / amount suffix: 2026年 / 11月 / 17日 / 1234元.
-            if (end < input.length()) {
-                char after = input.charAt(end);
-                if (after == '年' || after == '月' || after == '日' || after == '元' || after == '块' || after == '号') {
-                    continue;
+    private static String findBareCode(String str) {
+        boolean z;
+        char cCharAt;
+        Matcher matcher = BARE_DIGITS.matcher(str);
+        String str2 = null;
+        int i = 0;
+        while (matcher.find()) {
+            String strGroup = matcher.group(1);
+            int iStart = matcher.start(1);
+            int iEnd = matcher.end(1);
+            if (iStart > 0) {
+                int i2 = iStart - 1;
+                if (str.charAt(i2) == 65509 || str.charAt(i2) == 165) {
                 }
             }
-            // A 4-digit group that is a year (19xx/20xx) is not a code.
-            if (g.length() == 4 && (g.startsWith("19") || g.startsWith("20"))) {
-                continue;
-            }
-            // Order / card / tracking / room number, not a code.
-            String before = input.substring(Math.max(0, start - 8), start);
-            boolean excluded = false;
-            if (excludeWords != null) {
-                for (String w : excludeWords) {
-                    if (before.contains(w)) {
-                        excluded = true;
+            if (iEnd >= str.length() || ((cCharAt = str.charAt(iEnd)) != 24180 && cCharAt != 26376 && cCharAt != 26085 && cCharAt != 20803 && cCharAt != 22359 && cCharAt != 21495)) {
+                if (strGroup.length() != 4 || (!strGroup.startsWith("19") && !strGroup.startsWith("20"))) {
+                    String strSubstring = str.substring(Math.max(0, iStart - 8), iStart);
+                    if (excludeWords != null) {
+                        String[] strArr = excludeWords;
+                        int length = strArr.length;
+                        int i3 = 0;
+                        while (true) {
+                            if (i3 < length) {
+                                if (!strSubstring.contains(strArr[i3])) {
+                                    i3++;
+                                } else {
+                                    z = true;
+                                    break;
+                                }
+                            } else {
+                                z = false;
+                                break;
+                            }
+                        }
+                    } else {
+                        z = false;
                         break;
+                    }
+                    if (z) {
+                        continue;
+                    } else {
+                        i++;
+                        if (i > 1) {
+                            return null;
+                        }
+                        str2 = strGroup;
                     }
                 }
             }
-            if (excluded) {
-                continue;
-            }
-            count++;
-            if (count > 1) {
-                return null;
-            }
-            found = g;
         }
-        return found;
+        return str2;
     }
 }

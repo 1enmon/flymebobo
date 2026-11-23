@@ -8,212 +8,205 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 import java.util.ArrayList;
 import java.util.Collections;
+import java.util.Iterator;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
-/**
- * fixed18: network lyrics via LRCLIB (https://lrclib.net), the same source
- * Flyme Island uses (its NetEase/Kugou direct providers are disabled).
- * Lyrics no longer come from notifications at all — notification lyric
- * lines were unreliable (different apps hide them in different extras)
- * and they polluted the song title, which kept popping the docked player
- * out on every lyric refresh.
- *
- * Flow: fetch the synced LRC for (title, artist, album, duration) from
- * lrclib.net, parse "[mm:ss.xx]text" lines into timed lines, then
- * lineAt(positionMs) gives the line playing right now — that is the
- * scrolling playback.
- */
+/* JADX INFO: loaded from: classes.dex */
 public final class NetworkLyrics {
-    private static final String TAG = Settings.TAG;
+    private static final Pattern LRC_TIMESTAMP = Pattern.compile("\\[(\\d{1,2}):(\\d{1,2})(?:\\.(\\d{1,3}))?\\]");
+    private static final int MAX_LINES = 400;
+    private static final String TAG = "BubbleNotify: ";
     private static final int TIMEOUT_MS = 5500;
     private static final String USER_AGENT = "BubbleNotify/1.0.3 (LRCLIB)";
-    private static final int MAX_LINES = 400;
 
-    /** One timed lyric line. */
     public static final class Line implements Comparable<Line> {
-        public final long timeMs;
         public final String text;
+        public final long timeMs;
 
-        public Line(long timeMs, String text) {
-            this.timeMs = timeMs;
-            this.text = text;
+        public Line(long j, String str) {
+            this.timeMs = j;
+            this.text = str;
         }
 
-        @Override
-        public int compareTo(Line other) {
-            return Long.compare(this.timeMs, other.timeMs);
+        @Override // java.lang.Comparable
+        public int compareTo(Line line) {
+            return Long.compare(this.timeMs, line.timeMs);
         }
     }
 
     private NetworkLyrics() {
     }
 
-    /**
-     * Fetch the synced LRC for a song. Tries the exact-match endpoint
-     * first, then the search endpoint and picks the first result whose
-     * title and artist match. Returns the raw LRC text, or null.
-     * Must be called off the main thread.
-     */
-    public static String fetchSyncedLrc(String title, String artist, String album, long durationMs) {
-        if (title == null || title.isEmpty() || artist == null || artist.isEmpty()) {
+    public static String fetchSyncedLrc(String str, String str2, String str3, long j) {
+        String strSyncedFromJson;
+        String strSyncedFromJson2;
+        if (str == null || str.isEmpty() || str2 == null || str2.isEmpty()) {
             return null;
         }
         try {
-            Uri.Builder b = Uri.parse("https://lrclib.net/api/get").buildUpon()
-                    .appendQueryParameter("track_name", title)
-                    .appendQueryParameter("artist_name", artist);
-            if (album != null && !album.isEmpty()) {
-                b.appendQueryParameter("album_name", album);
+            Uri.Builder builderAppendQueryParameter = Uri.parse("https://lrclib.net/api/get").buildUpon().appendQueryParameter("track_name", str).appendQueryParameter("artist_name", str2);
+            if (str3 != null && !str3.isEmpty()) {
+                builderAppendQueryParameter.appendQueryParameter("album_name", str3);
             }
-            if (durationMs > 0) {
-                b.appendQueryParameter("duration", Long.toString(Math.round(durationMs / 1000.0)));
+            if (j > 0) {
+                builderAppendQueryParameter.appendQueryParameter("duration", Long.toString(Math.round(j / 1000.0d)));
             }
-            String body = httpGet(b.build().toString());
-            if (body != null) {
-                String lrc = syncedFromJson(new JSONObject(body));
-                if (lrc != null) {
-                    return lrc;
-                }
+            String strHttpGet = httpGet(builderAppendQueryParameter.build().toString());
+            if (strHttpGet != null && (strSyncedFromJson2 = syncedFromJson(new JSONObject(strHttpGet))) != null) {
+                return strSyncedFromJson2;
             }
         } catch (Throwable th) {
-            Log.i(TAG, "LRCLIB get failed: " + th.getClass().getSimpleName());
+            Log.i("BubbleNotify: ", "LRCLIB get failed: " + th.getClass().getSimpleName());
         }
-        // Fallback: search, take the first title+artist match with synced lyrics.
         try {
-            Uri.Builder b = Uri.parse("https://lrclib.net/api/search").buildUpon()
-                    .appendQueryParameter("track_name", title)
-                    .appendQueryParameter("artist_name", artist);
-            if (album != null && !album.isEmpty()) {
-                b.appendQueryParameter("album_name", album);
+            Uri.Builder builderAppendQueryParameter2 = Uri.parse("https://lrclib.net/api/search").buildUpon().appendQueryParameter("track_name", str).appendQueryParameter("artist_name", str2);
+            if (str3 != null && !str3.isEmpty()) {
+                builderAppendQueryParameter2.appendQueryParameter("album_name", str3);
             }
-            String body = httpGet(b.build().toString());
-            if (body == null) {
+            String strHttpGet2 = httpGet(builderAppendQueryParameter2.build().toString());
+            if (strHttpGet2 == null) {
                 return null;
             }
-            JSONArray arr = new JSONArray(body);
-            for (int i = 0; i < arr.length() && i < 20; i++) {
-                JSONObject obj = arr.optJSONObject(i);
-                if (obj == null) {
-                    continue;
-                }
-                String t = obj.optString("trackName", "");
-                String a = obj.optString("artistName", "");
-                if (t.equalsIgnoreCase(title.trim()) && a.equalsIgnoreCase(artist.trim())) {
-                    String lrc = syncedFromJson(obj);
-                    if (lrc != null) {
-                        return lrc;
+            JSONArray jSONArray = new JSONArray(strHttpGet2);
+            for (int i = 0; i < jSONArray.length() && i < 20; i++) {
+                JSONObject jSONObjectOptJSONObject = jSONArray.optJSONObject(i);
+                if (jSONObjectOptJSONObject != null) {
+                    String strOptString = jSONObjectOptJSONObject.optString("trackName", "");
+                    String strOptString2 = jSONObjectOptJSONObject.optString("artistName", "");
+                    if (strOptString.equalsIgnoreCase(str.trim()) && strOptString2.equalsIgnoreCase(str2.trim()) && (strSyncedFromJson = syncedFromJson(jSONObjectOptJSONObject)) != null) {
+                        return strSyncedFromJson;
                     }
                 }
             }
-        } catch (Throwable th) {
-            Log.i(TAG, "LRCLIB search failed: " + th.getClass().getSimpleName());
+        } catch (Throwable th2) {
+            Log.i("BubbleNotify: ", "LRCLIB search failed: " + th2.getClass().getSimpleName());
         }
         return null;
     }
 
-    private static String syncedFromJson(JSONObject obj) {
-        String s = obj.optString("syncedLyrics", null);
-        if (s == null) {
+    private static String syncedFromJson(JSONObject jSONObject) {
+        String strOptString = jSONObject.optString("syncedLyrics", null);
+        if (strOptString == null) {
             return null;
         }
-        s = s.trim();
-        return s.isEmpty() ? null : s;
+        String strTrim = strOptString.trim();
+        if (strTrim.isEmpty()) {
+            return null;
+        }
+        return strTrim;
     }
 
-    private static String httpGet(String urlStr) {
-        HttpURLConnection conn = null;
+    private static String httpGet(String str) {
+        HttpURLConnection httpURLConnection;
         try {
-            conn = (HttpURLConnection) new URL(urlStr).openConnection();
-            conn.setConnectTimeout(TIMEOUT_MS);
-            conn.setReadTimeout(TIMEOUT_MS);
-            conn.setRequestProperty("User-Agent", USER_AGENT);
-            conn.setRequestProperty("Accept", "application/json");
-            if (conn.getResponseCode() != 200) {
+            httpURLConnection = (HttpURLConnection) new URL(str).openConnection();
+            try {
+                httpURLConnection.setConnectTimeout(TIMEOUT_MS);
+                httpURLConnection.setReadTimeout(TIMEOUT_MS);
+                httpURLConnection.setRequestProperty("User-Agent", USER_AGENT);
+                httpURLConnection.setRequestProperty("Accept", "application/json");
+                if (httpURLConnection.getResponseCode() == 200) {
+                    BufferedReader bufferedReader = new BufferedReader(new InputStreamReader(httpURLConnection.getInputStream(), "UTF-8"));
+                    StringBuilder sb = new StringBuilder();
+                    while (true) {
+                        String line = bufferedReader.readLine();
+                        if (line == null) {
+                            break;
+                        }
+                        sb.append(line).append('\n');
+                    }
+                    bufferedReader.close();
+                    String string = sb.toString();
+                    if (httpURLConnection != null) {
+                        httpURLConnection.disconnect();
+                    }
+                    return string;
+                }
+                if (httpURLConnection != null) {
+                    httpURLConnection.disconnect();
+                }
+                return null;
+            } catch (Throwable th) {
+                if (httpURLConnection != null) {
+                    httpURLConnection.disconnect();
+                }
                 return null;
             }
-            BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream(), "UTF-8"));
-            StringBuilder sb = new StringBuilder();
-            String line;
-            while ((line = reader.readLine()) != null) {
-                sb.append(line).append('\n');
-            }
-            reader.close();
-            return sb.toString();
-        } catch (Throwable th) {
-            return null;
-        } finally {
-            if (conn != null) {
-                conn.disconnect();
-            }
+        } catch (Throwable th2) {
+            httpURLConnection = null;
         }
+        return null;
     }
 
-    private static final Pattern LRC_TIMESTAMP =
-            Pattern.compile("\\[(\\d{1,2}):(\\d{1,2})(?:\\.(\\d{1,3}))?\\]");
-
-    /** Parse LRC text into timed lines, sorted by time. */
-    public static List<Line> parseLrc(String lrc) {
-        List<Line> lines = new ArrayList<>();
-        if (lrc == null) {
-            return lines;
-        }
-        for (String raw : lrc.split("\\r?\\n")) {
-            if (lines.size() >= MAX_LINES) {
-                break;
-            }
-            Matcher m = LRC_TIMESTAMP.matcher(raw);
-            List<Long> times = new ArrayList<>();
-            int textStart = 0;
-            while (m.find()) {
-                long min = Long.parseLong(m.group(1));
-                long sec = Long.parseLong(m.group(2));
-                String frac = m.group(3);
-                long ms = 0;
-                if (frac != null) {
-                    ms = Long.parseLong(frac);
-                    if (frac.length() == 1) {
-                        ms *= 100;
-                    } else if (frac.length() == 2) {
-                        ms *= 10;
+    public static List<Line> parseLrc(String str) {
+        long j;
+        ArrayList arrayList = new ArrayList();
+        if (str != null) {
+            for (String str2 : str.split("\\r?\\n")) {
+                if (arrayList.size() >= MAX_LINES) {
+                    break;
+                }
+                Matcher matcher = LRC_TIMESTAMP.matcher(str2);
+                ArrayList arrayList2 = new ArrayList();
+                int iMax = 0;
+                while (matcher.find()) {
+                    long j2 = Long.parseLong(matcher.group(1));
+                    long j3 = Long.parseLong(matcher.group(2));
+                    String strGroup = matcher.group(3);
+                    if (strGroup == null) {
+                        j = 0;
+                    } else {
+                        j = Long.parseLong(strGroup);
+                        if (strGroup.length() != 1) {
+                            if (strGroup.length() == 2) {
+                                j *= 10;
+                            }
+                        } else {
+                            j *= 100;
+                        }
+                    }
+                    arrayList2.add(Long.valueOf((j2 * 60000) + (j3 * 1000) + j));
+                    iMax = Math.max(iMax, matcher.end());
+                }
+                if (!arrayList2.isEmpty()) {
+                    String strTrim = str2.substring(iMax).trim();
+                    if (!strTrim.isEmpty()) {
+                        Iterator it = arrayList2.iterator();
+                        while (it.hasNext()) {
+                            arrayList.add(new Line(((Long) it.next()).longValue(), strTrim));
+                        }
                     }
                 }
-                times.add(min * 60000L + sec * 1000L + ms);
-                textStart = Math.max(textStart, m.end());
             }
-            if (times.isEmpty()) {
-                continue;
-            }
-            String text = raw.substring(textStart).trim();
-            if (text.isEmpty()) {
-                continue;
-            }
-            for (Long t : times) {
-                lines.add(new Line(t, text));
-            }
+            Collections.sort(arrayList);
+            return arrayList;
         }
-        Collections.sort(lines);
-        return lines;
+        return arrayList;
     }
 
-    /** The lyric line playing at positionMs, or null. Binary search. */
-    public static String lineAt(List<Line> lines, long positionMs) {
-        if (lines == null || lines.isEmpty()) {
+    public static String lineAt(List<Line> list, long j) {
+        if (list == null || list.isEmpty()) {
             return null;
         }
-        int lo = 0, hi = lines.size() - 1, found = -1;
-        while (lo <= hi) {
-            int mid = (lo + hi) >>> 1;
-            if (lines.get(mid).timeMs <= positionMs) {
-                found = mid;
-                lo = mid + 1;
+        int size = list.size() - 1;
+        int i = 0;
+        int i2 = -1;
+        while (i <= size) {
+            int i3 = (i + size) >>> 1;
+            if (list.get(i3).timeMs <= j) {
+                i = i3 + 1;
+                i2 = i3;
             } else {
-                hi = mid - 1;
+                size = i3 - 1;
             }
         }
-        return found < 0 ? null : lines.get(found).text;
+        if (i2 < 0) {
+            return null;
+        }
+        return list.get(i2).text;
     }
 }

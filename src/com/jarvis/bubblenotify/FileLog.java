@@ -8,67 +8,67 @@ import java.text.SimpleDateFormat;
 import java.util.Date;
 import java.util.Locale;
 
-// fixed35: the module records its own diagnostic log to a file, so the
-// user can export it without fighting logcat permissions (the Logcat
-// Reader app recorded 0 logs — it never got READ_LOGS). Every process
-// the module runs in appends to the same file (SystemUI, the listener
-// service, incallui), so each line carries its process name — that is
-// also what settles the two-process double-pop theory. /data/local/tmp
-// is world-writable, so no storage permission is needed from any of
-// these processes (the module manifest does not declare one).
+/* JADX INFO: loaded from: classes.dex */
 public class FileLog {
-    public static final String LOG_PATH = "/data/local/tmp/BubbleNotify.log";
-    // fixed50: fallback location — on some devices /data/local/tmp is not
-    // writable from SystemUI / the listener service (SELinux), so the log
-    // file never appears and the export fails ("日志文件不存在"). Try the
-    // sdcard copy too; the export checks both paths.
-    public static final String LOG_PATH_ALT = "/sdcard/BubbleNotify.log";
-    // fixed51: third location — the module app's own private files dir.
-    // Only the listener-service process (com.jarvis.bubblenotify) can
-    // write here; SystemUI fails silently. But the service's "Posted" /
-    // "Added" lines are the ones that matter most for double-pop, and
-    // MainActivity can always read its own private dir, so the export
-    // works even when both shared locations are blocked.
-    public static final String LOG_PATH_PRIVATE = "/data/data/com.jarvis.bubblenotify/files/BubbleNotify.log";
-    private static final long MAX_BYTES = 2 * 1024 * 1024; // 2 MB, then restart the file
     private static final Object LOCK = new Object();
+    public static final String LOG_PATH = "/data/local/tmp/BubbleNotify.log";
+    public static final String LOG_PATH_ALT = "/sdcard/BubbleNotify.log";
+    public static final String LOG_PATH_PRIVATE = "/data/data/com.jarvis.bubblenotify/files/BubbleNotify.log";
+    // fixed199: separate log for the listener service. The app
+    // creates and owns this file, so it can always write; it
+    // sits on /sdcard root, so the user can read it with a
+    // normal file manager. SystemUI keeps the old file.
+    public static final String LOG_PATH_SVC = "/sdcard/BubbleNotify-svc.log";
+    private static final long MAX_BYTES = 2097152;
     private static String cachedProcessName;
 
-    // Mirrors the message to logcat (as before) and appends it to the file.
-    public static void i(String msg) {
+    public static void i(String str) {
         try {
-            Log.i(Settings.TAG, msg);
-        } catch (Throwable ignored) {
+            Log.i(Settings.TAG, str);
+        } catch (Throwable th) {
         }
-        write(msg);
+        write(str);
     }
 
-    private static void write(String msg) {
+    private static void write(String str) {
         synchronized (LOCK) {
-            String line = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(new Date())
-                    + " " + processName() + " " + msg + "\n";
-            writeTo(LOG_PATH, line);
-            writeTo(LOG_PATH_ALT, line);
-            writeTo(LOG_PATH_PRIVATE, line);
+            // fixed214: every log line carries the version
+            // (v<versionCode>) so a log file always says which
+            // build produced it.
+            String str2 = new SimpleDateFormat("MM-dd HH:mm:ss.SSS", Locale.US).format(new Date()) + " " + processName() + " v" + Settings.VERSION_CODE + " " + str + "\n";
+            String proc = processName();
+            if (proc != null && proc.contains("bubblenotify")) {
+                // Listener service (app process): write the
+                // app-owned file the user can read. Do NOT write
+                // the SystemUI-owned /sdcard file from here.
+                writeTo(LOG_PATH_SVC, str2);
+                writeTo(LOG_PATH_PRIVATE, str2);
+            } else {
+                // SystemUI (and anything else): the old file.
+                writeTo(LOG_PATH, str2);
+                writeTo(LOG_PATH_ALT, str2);
+                writeTo(LOG_PATH_PRIVATE, str2);
+            }
         }
     }
 
-    private static void writeTo(String path, String line) {
+    private static void writeTo(String str, String str2) {
         try {
-            File f = new File(path);
-            if (f.exists() && f.length() > MAX_BYTES) {
-                if (!f.delete()) {
-                    return;
-                }
+            File file = new File(str);
+            File parent = file.getParentFile();
+            if (parent != null && !parent.exists()) {
+                parent.mkdirs();
             }
-            FileOutputStream out = new FileOutputStream(f, true);
+            if (file.exists() && file.length() > MAX_BYTES && !file.delete()) {
+                return;
+            }
+            FileOutputStream fileOutputStream = new FileOutputStream(file, true);
             try {
-                out.write(line.getBytes("UTF-8"));
+                fileOutputStream.write(str2.getBytes("UTF-8"));
             } finally {
-                out.close();
+                fileOutputStream.close();
             }
-        } catch (Throwable ignored) {
-            // never crash the module for logging
+        } catch (Throwable th) {
         }
     }
 
@@ -76,25 +76,25 @@ public class FileLog {
         if (cachedProcessName != null) {
             return cachedProcessName;
         }
-        String name = "?";
+        String str = "?";
         try {
-            FileInputStream in = new FileInputStream("/proc/self/cmdline");
-            byte[] buf = new byte[256];
-            int n = in.read(buf);
-            in.close();
-            if (n > 0) {
-                String s = new String(buf, 0, n, "UTF-8");
-                int z = s.indexOf('\0');
-                if (z >= 0) {
-                    s = s.substring(0, z);
+            FileInputStream fileInputStream = new FileInputStream("/proc/self/cmdline");
+            byte[] bArr = new byte[256];
+            int i = fileInputStream.read(bArr);
+            fileInputStream.close();
+            if (i > 0) {
+                String str2 = new String(bArr, 0, i, "UTF-8");
+                int iIndexOf = str2.indexOf(0);
+                if (iIndexOf >= 0) {
+                    str2 = str2.substring(0, iIndexOf);
                 }
-                if (!s.isEmpty()) {
-                    name = s;
+                if (!str2.isEmpty()) {
+                    str = str2;
                 }
             }
-        } catch (Throwable ignored) {
+        } catch (Throwable th) {
         }
-        cachedProcessName = name;
-        return name;
+        cachedProcessName = str;
+        return str;
     }
 }

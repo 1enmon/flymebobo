@@ -14,7 +14,6 @@ import java.util.List;
 /* JADX INFO: loaded from: classes.dex */
 public class IconView extends View {
     public static final float CORNER_CIRCLE = 999.0f;
-    /** VectorIcons uses a 24x24 viewport. */
     private static final float VIEWPORT = 24.0f;
     private int bgColor;
     private float bgCornerDp;
@@ -25,28 +24,28 @@ public class IconView extends View {
     private final float density;
     private Drawable icon;
     private int iconColor;
+    private final Paint iconFillPaint;
+    private final List<IconPath> iconPaths;
     private int iconSizeDp;
+    private final Paint iconStrokePaint;
     private float rotationDeg;
     private final Paint strokePaint;
-    /** Path-drawn icon, parsed from the vector XML. Drawn with Canvas when present. */
-    private final List<IconPath> iconPaths = new ArrayList<>();
-    private final Paint iconFillPaint;
-    private final Paint iconStrokePaint;
 
     private static final class IconPath {
         final Path path;
         final boolean stroke;
         final float strokeWidth;
 
-        IconPath(Path path, boolean stroke, float strokeWidth) {
+        IconPath(Path path, boolean z, float f) {
             this.path = path;
-            this.stroke = stroke;
-            this.strokeWidth = strokeWidth;
+            this.stroke = z;
+            this.strokeWidth = f;
         }
     }
 
     public IconView(Context context) {
         super(context);
+        this.iconPaths = new ArrayList();
         this.iconColor = -1;
         this.bgColor = 0;
         this.bgCornerDp = 999.0f;
@@ -64,6 +63,7 @@ public class IconView extends View {
 
     public IconView(Context context, AttributeSet attributeSet) {
         super(context, attributeSet);
+        this.iconPaths = new ArrayList();
         this.iconColor = -1;
         this.bgColor = 0;
         this.bgCornerDp = 999.0f;
@@ -95,86 +95,77 @@ public class IconView extends View {
         invalidate();
     }
 
-    /**
-     * Extract the &lt;path&gt; elements from the vector XML string and parse
-     * their pathData into Canvas paths. This replaces the fragile
-     * Drawable.createFromXml() inflation, which can silently return null in
-     * SystemUI and leaves the button as a bare coloured circle.
-     */
-    private void parseIconXml(String xml) {
-        try {
-            int idx = 0;
-            while (true) {
-                int start = xml.indexOf("<path", idx);
-                if (start < 0) {
+    private void parseIconXml(String str) {
+        int iIndexOf;
+        float f;
+        int i = 0;
+        while (true) {
+            try {
+                int iIndexOf2 = str.indexOf("<path", i);
+                if (iIndexOf2 < 0 || (iIndexOf = str.indexOf("/>", iIndexOf2)) < 0) {
                     break;
                 }
-                int end = xml.indexOf("/>", start);
-                if (end < 0) {
-                    break;
-                }
-                String tag = xml.substring(start, end);
-                String pathData = attr(tag, "android:pathData");
-                if (pathData != null) {
-                    String fill = attr(tag, "android:fillColor");
-                    String stroke = attr(tag, "android:strokeColor");
-                    String sw = attr(tag, "android:strokeWidth");
+                String strSubstring = str.substring(iIndexOf2, iIndexOf);
+                String strAttr = attr(strSubstring, "android:pathData");
+                if (strAttr != null) {
+                    String strAttr2 = attr(strSubstring, "android:fillColor");
+                    String strAttr3 = attr(strSubstring, "android:strokeColor");
+                    String strAttr4 = attr(strSubstring, "android:strokeWidth");
                     final Path path = new Path();
-                    SvgPathParser.parse(pathData, new SvgPathParser.PathSink() {
-                        @Override
-                        public void moveTo(float x, float y) {
-                            path.moveTo(x, y);
+                    SvgPathParser.parse(strAttr, new SvgPathParser.PathSink() { // from class: com.jarvis.bubblenotify.IconView.1
+                        @Override // com.jarvis.bubblenotify.SvgPathParser.PathSink
+                        public void moveTo(float f2, float f3) {
+                            path.moveTo(f2, f3);
                         }
 
-                        @Override
-                        public void lineTo(float x, float y) {
-                            path.lineTo(x, y);
+                        @Override // com.jarvis.bubblenotify.SvgPathParser.PathSink
+                        public void lineTo(float f2, float f3) {
+                            path.lineTo(f2, f3);
                         }
 
-                        @Override
-                        public void cubicTo(float x1, float y1, float x2, float y2, float x, float y) {
-                            path.cubicTo(x1, y1, x2, y2, x, y);
+                        @Override // com.jarvis.bubblenotify.SvgPathParser.PathSink
+                        public void cubicTo(float f2, float f3, float f4, float f5, float f6, float f7) {
+                            path.cubicTo(f2, f3, f4, f5, f6, f7);
                         }
 
-                        @Override
-                        public void quadTo(float x1, float y1, float x, float y) {
-                            path.quadTo(x1, y1, x, y);
+                        @Override // com.jarvis.bubblenotify.SvgPathParser.PathSink
+                        public void quadTo(float f2, float f3, float f4, float f5) {
+                            path.quadTo(f2, f3, f4, f5);
                         }
 
-                        @Override
+                        @Override // com.jarvis.bubblenotify.SvgPathParser.PathSink
                         public void close() {
                             path.close();
                         }
                     });
-                    boolean isStroke = stroke != null && !"#00000000".equalsIgnoreCase(stroke)
-                            && (fill == null || "#00000000".equalsIgnoreCase(fill));
-                    float strokeWidth = 1.0f;
-                    if (sw != null) {
+                    boolean z = (strAttr3 == null || "#00000000".equalsIgnoreCase(strAttr3) || (strAttr2 != null && !"#00000000".equalsIgnoreCase(strAttr2))) ? false : true;
+                    if (strAttr4 != null) {
                         try {
-                            strokeWidth = Float.parseFloat(sw);
-                        } catch (Throwable ignored) {
+                            f = Float.parseFloat(strAttr4);
+                        } catch (Throwable th) {
+                            f = 1.0f;
                         }
+                    } else {
+                        f = 1.0f;
                     }
-                    this.iconPaths.add(new IconPath(path, isStroke, strokeWidth));
+                    this.iconPaths.add(new IconPath(path, z, f));
                 }
-                idx = end + 2;
+                i = iIndexOf + 2;
+            } catch (Throwable th2) {
+                this.iconPaths.clear();
+                return;
             }
-        } catch (Throwable ignored) {
-            this.iconPaths.clear();
         }
     }
 
-    private static String attr(String tag, String name) {
-        String key = name + "=\"";
-        int i = tag.indexOf(key);
-        if (i < 0) {
+    private static String attr(String str, String str2) {
+        int iIndexOf;
+        String str3 = str2 + "=\"";
+        int iIndexOf2 = str.indexOf(str3);
+        if (iIndexOf2 < 0 || (iIndexOf = str.indexOf(34, str3.length() + iIndexOf2)) < 0) {
             return null;
         }
-        int j = tag.indexOf('"', i + key.length());
-        if (j < 0) {
-            return null;
-        }
-        return tag.substring(i + key.length(), j);
+        return str.substring(iIndexOf2 + str3.length(), iIndexOf);
     }
 
     public void setIconColor(int i) {
@@ -248,8 +239,8 @@ public class IconView extends View {
         if (!this.iconPaths.isEmpty()) {
             canvas.save();
             canvas.translate(i, i2);
-            float scale = iDp / VIEWPORT;
-            canvas.scale(scale, scale);
+            float f3 = iDp / VIEWPORT;
+            canvas.scale(f3, f3);
             for (IconPath iconPath : this.iconPaths) {
                 if (iconPath.stroke) {
                     this.iconStrokePaint.setColor(this.iconColor);
